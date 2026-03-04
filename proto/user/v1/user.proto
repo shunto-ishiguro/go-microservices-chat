@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package user.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "go-microservices-chat/gen/go/user/v1;userv1";
+
+// UserService provides user management, friend management, and presence operations.
+service UserService {
+  // User management
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
+  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
+
+  // Friend management
+  rpc ListFriends(ListFriendsRequest) returns (ListFriendsResponse);
+  rpc SendFriendRequest(SendFriendRequestRequest) returns (SendFriendRequestResponse);
+  rpc AcceptFriendRequest(AcceptFriendRequestRequest) returns (AcceptFriendRequestResponse);
+
+  // Presence
+  rpc GetUserPresence(GetUserPresenceRequest) returns (GetUserPresenceResponse);
+}
+
+// User represents a user in the system.
+message User {
+  string id = 1;
+  string email = 2;
+  string username = 3;
+  string display_name = 4;
+  string avatar_url = 5;
+  string status_text = 6;
+  bool is_online = 7;
+  google.protobuf.Timestamp last_seen_at = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+message CreateUserRequest {
+  string email = 1;
+  string username = 2;
+  string display_name = 3;
+  string cognito_sub = 4;
+}
+
+message CreateUserResponse {
+  User user = 1;
+}
+
+message GetUserRequest {
+  string user_id = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message UpdateUserRequest {
+  string user_id = 1;
+  optional string display_name = 2;
+  optional string avatar_url = 3;
+  optional string status_text = 4;
+}
+
+message UpdateUserResponse {
+  User user = 1;
+}
+
+message SearchUsersRequest {
+  string query = 1;
+  int32 limit = 2;
+  string cursor = 3;
+}
+
+message SearchUsersResponse {
+  repeated User users = 1;
+  string next_cursor = 2;
+}
+
+message ListFriendsRequest {
+  string user_id = 1;
+}
+
+message ListFriendsResponse {
+  repeated User friends = 1;
+}
+
+message SendFriendRequestRequest {
+  string user_id = 1;
+  string friend_id = 2;
+}
+
+message SendFriendRequestResponse {}
+
+message AcceptFriendRequestRequest {
+  string user_id = 1;
+  string friend_id = 2;
+}
+
+message AcceptFriendRequestResponse {}
+
+message GetUserPresenceRequest {
+  repeated string user_ids = 1;
+}
+
+message GetUserPresenceResponse {
+  map<string, bool> presence = 1;
+}
