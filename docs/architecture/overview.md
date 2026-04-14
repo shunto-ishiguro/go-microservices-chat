@@ -14,52 +14,27 @@
 
 ## システムアーキテクチャ図
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                          クライアント                                │
-│                   (Web Browser / Mobile App)                        │
-└──────────────┬──────────────────────┬───────────────────────────────┘
-               │ HTTPS (REST)         │ WSS (WebSocket)
-               ▼                      ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│                        API Gateway Service                           │
-│                    (認証・ルーティング・レート制限)                     │
-│                         Port: 8080                                    │
-└──────┬──────────┬──────────┬──────────┬──────────┬──────────────────┘
-       │gRPC      │gRPC      │gRPC      │gRPC      │WebSocket Proxy
-       ▼          ▼          ▼          ▼          ▼
-┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌──────────────────┐
-│  User    ││  Chat    ││  Media   ││Notifica- ││   Realtime       │
-│ Service  ││ Service  ││ Service  ││  tion    ││   Service        │
-│          ││          ││          ││ Service  ││                  │
-│ REST/gRPC││   gRPC   ││ REST/gRPC││  gRPC   ││ WebSocket+gRPC   │
-│ :50051   ││  :50052  ││  :50054  ││ :50053  ││ :50055 / :8081   │
-└────┬─────┘└────┬─────┘└────┬─────┘└────┬─────┘└────────┬─────────┘
-     │           │           │           │                │
-     ▼           ▼           ▼           ▼                ▼
-┌──────────┐┌──────────┐┌──────────┐┌──────────┐┌─────────────────┐
-│PostgreSQL││PostgreSQL ││   S3     ││ DynamoDB ││    Redis         │
-│(Users)   ││(Messages) ││ (Files)  ││(通知履歴) ││ (Pub/Sub +      │
-│          ││→DynamoDB  ││          ││          ││  プレゼンス)      │
-└──────────┘└──────────┘└──────────┘└──────────┘└─────────────────┘
+```mermaid
+graph TD
+    Client["クライアント<br/>(Web Browser / Mobile App)"]
 
-              ┌──────────────────────────────────┐
-              │         非同期メッセージング        │
-              │     Amazon SQS / Amazon SNS       │
-              │                                    │
-              │  ・メッセージ配信イベント            │
-              │  ・通知トリガー                     │
-              │  ・メディアアップロード処理           │
-              └──────────────────────────────────┘
+    Client -->|"HTTPS (REST)"| GW["API Gateway Service<br/>認証・ルーティング・レート制限<br/>Port: 8080"]
+    Client -->|"WSS (WebSocket)"| GW
 
-              ┌──────────────────────────────────┐
-              │          認証基盤                  │
-              │       Amazon Cognito              │
-              │                                    │
-              │  ・ユーザー認証 (JWT)              │
-              │  ・ソーシャルログイン               │
-              │  ・トークン管理                    │
-              └──────────────────────────────────┘
+    GW -->|gRPC| US["User Service<br/>REST/gRPC :50051"]
+    GW -->|gRPC| CS["Chat Service<br/>gRPC :50052"]
+    GW -->|gRPC| MS["Media Service<br/>REST/gRPC :50054"]
+    GW -->|gRPC| NS["Notification Service<br/>gRPC :50053"]
+    GW -->|"WebSocket Proxy"| RS["Realtime Service<br/>WebSocket+gRPC<br/>:50055 / :8081"]
+
+    US --> PG1[("PostgreSQL<br/>(Users)")]
+    CS --> PG2[("PostgreSQL<br/>(Messages)→DynamoDB")]
+    MS --> S3[("S3<br/>(Files)")]
+    NS --> DDB[("DynamoDB<br/>(通知履歴)")]
+    RS --> Redis[("Redis<br/>(Pub/Sub + プレゼンス)")]
+
+    SQS["非同期メッセージング<br/>Amazon SQS / Amazon SNS<br/>・メッセージ配信イベント<br/>・通知トリガー<br/>・メディアアップロード処理"]
+    Cognito["認証基盤<br/>Amazon Cognito<br/>・ユーザー認証 (JWT)<br/>・ソーシャルログイン<br/>・トークン管理"]
 ```
 
 ## マイクロサービス一覧
@@ -77,8 +52,9 @@
 
 ### 同期通信（リクエスト/レスポンス）
 
-```
-クライアント → API Gateway → 各サービス
+```mermaid
+graph LR
+    A[クライアント] --> B[API Gateway] --> C[各サービス]
 ```
 
 - **REST API**: クライアント ↔ API Gateway 間
@@ -87,9 +63,11 @@
 
 ### 非同期通信（イベント駆動）
 
-```
-Chat Service → SNS Topic → SQS Queue → Notification Service
-                                      → Realtime Service
+```mermaid
+graph LR
+    CS[Chat Service] --> SNS[SNS Topic] --> SQS[SQS Queue]
+    SQS --> NS[Notification Service]
+    SQS --> RS[Realtime Service]
 ```
 
 - **Amazon SNS**: イベントのファンアウト（1つのイベントを複数サービスへ）

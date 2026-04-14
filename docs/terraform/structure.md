@@ -526,11 +526,11 @@ terraform {
 
 ## Terraform ワークフロー
 
-```
-1. terraform init        # プロバイダー・モジュールの初期化
-2. terraform plan        # 変更内容のプレビュー
-3. terraform apply       # インフラの作成・更新
-4. terraform destroy     # インフラの削除（dev のみ）
+```mermaid
+graph LR
+    A["1. terraform init<br/>プロバイダー・モジュールの初期化"] --> B["2. terraform plan<br/>変更内容のプレビュー"]
+    B --> C["3. terraform apply<br/>インフラの作成・更新"]
+    C --> D["4. terraform destroy<br/>インフラの削除（dev のみ）"]
 ```
 
 ### CI/CD での実行

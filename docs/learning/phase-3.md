@@ -41,18 +41,17 @@ WebSocket プロトコルの仕組みを理解する。
 - [ ] WebSocket のライフサイクル（接続 → 通信 → 切断）
 - [ ] セキュリティ考慮事項（Origin チェック、WSS）
 
-```
-クライアント                        サーバー
-    │                                │
-    │── HTTP GET (Upgrade: websocket)─→│
-    │←── HTTP 101 Switching Protocols ─│
-    │                                │
-    │←────── 双方向通信開始 ──────→│
-    │   テキスト/バイナリフレーム   │
-    │                                │
-    │── Close Frame ────────────→│
-    │←── Close Frame ────────────│
-    │                                │
+```mermaid
+sequenceDiagram
+    participant C as クライアント
+    participant S as サーバー
+    C->>S: HTTP GET (Upgrade: websocket)
+    S->>C: HTTP 101 Switching Protocols
+    Note over C,S: 双方向通信開始
+    C->>S: テキスト/バイナリフレーム
+    S->>C: テキスト/バイナリフレーム
+    C->>S: Close Frame
+    S->>C: Close Frame
 ```
 
 **確認ポイント**: WebSocket のハンドシェイクと通信フローを説明できること。
@@ -130,28 +129,34 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 ### Hub パターンの構造
 
+```mermaid
+graph TD
+    Hub["Hub<br/>rooms map / register ch<br/>unregister / broadcast"]
+    Hub --> RA["Room A<br/>clients"]
+    Hub --> RB["Room B<br/>clients"]
+    Hub --> RC["Room C<br/>clients"]
+    RA --> C1[C1]
+    RA --> C2[C2]
+    RA --> C3[C3]
+    RB --> C4[C4]
+    RB --> C5[C5]
+    RB --> C6[C6]
+    RC --> C7[C7]
+    RC --> C8[C8]
+    RC --> C9[C9]
+
+    style C1 fill:#e1f5fe
+    style C2 fill:#e1f5fe
+    style C3 fill:#e1f5fe
+    style C4 fill:#e1f5fe
+    style C5 fill:#e1f5fe
+    style C6 fill:#e1f5fe
+    style C7 fill:#e1f5fe
+    style C8 fill:#e1f5fe
+    style C9 fill:#e1f5fe
 ```
-                    ┌─────────────┐
-                    │     Hub     │
-                    │             │
-                    │ rooms map   │
-                    │ register ch │
-                    │ unregister  │
-                    │ broadcast   │
-                    └──────┬──────┘
-                           │
-            ┌──────────────┼──────────────┐
-            │              │              │
-      ┌─────┴─────┐ ┌─────┴─────┐ ┌─────┴─────┐
-      │  Room A   │ │  Room B   │ │  Room C   │
-      │ clients   │ │ clients   │ │ clients   │
-      └─────┬─────┘ └─────┬─────┘ └─────┬─────┘
-            │              │              │
-       ┌────┼────┐    ┌───┼───┐     ┌───┼───┐
-       │    │    │    │   │   │     │   │   │
-      C1   C2   C3   C4  C5  C6   C7  C8  C9
-    (WebSocket 接続)
-```
+
+> C1〜C9 は WebSocket 接続
 
 **確認ポイント**: 複数クライアントがルームに参加し、メッセージがブロードキャストされること。
 
@@ -277,28 +282,20 @@ Redis データ構造:
 - [ ] ルーム内の他のメンバーへのブロードキャスト
 - [ ] Redis を使ったタイピング状態管理（TTL 付き）
 
-```
-タイピングインジケーターのフロー:
+```mermaid
+sequenceDiagram
+    participant A as ユーザーA (入力中)
+    participant RS as realtime-service
+    participant R as Redis
+    participant BC as ユーザーB, C
 
-  ユーザーA (入力中)
-       │
-       │── typing_start ──→  realtime-service
-       │                          │
-       │                    Redis SET typing:{room}:{user} (TTL: 5s)
-       │                          │
-       │                    Broadcast to Room
-       │                          │
-       │                   ユーザーB, C に通知
-       │                   「ユーザーA が入力中...」
-       │
-       │── typing_stop ───→  realtime-service
-       │                          │
-       │                    Redis DEL typing:{room}:{user}
-       │                          │
-       │                    Broadcast to Room
-       │                          │
-       │                   ユーザーB, C に通知
-       │                   (インジケーター非表示)
+    A->>RS: typing_start
+    RS->>R: SET typing:{room}:{user} (TTL: 5s)
+    RS->>BC: Broadcast「ユーザーA が入力中...」
+
+    A->>RS: typing_stop
+    RS->>R: DEL typing:{room}:{user}
+    RS->>BC: Broadcast (インジケーター非表示)
 ```
 
 **確認ポイント**: ユーザーが入力中のとき、同じルームの他ユーザーに「入力中」が表示されること。
@@ -313,12 +310,12 @@ Redis Pub/Sub を使って複数の realtime-service インスタンス間でメ
 - [ ] Redis Pub/Sub によるインスタンス間メッセージ同期
 - [ ] アーキテクチャ設計:
 
-```
-  クライアントA ──→ realtime-service (インスタンス1)
-                          │
-                     Redis Pub/Sub ←──── 共通チャネル
-                          │
-  クライアントB ──→ realtime-service (インスタンス2)
+```mermaid
+graph LR
+    CA[クライアントA] --> RS1["realtime-service<br/>(インスタンス1)"]
+    RS1 <--> Redis["Redis Pub/Sub<br/>共通チャネル"]
+    Redis <--> RS2["realtime-service<br/>(インスタンス2)"]
+    CB[クライアントB] --> RS2
 ```
 
 - [ ] ローカル Hub + Redis Pub/Sub のハイブリッド構成
@@ -326,24 +323,24 @@ Redis Pub/Sub を使って複数の realtime-service インスタンス間でメ
 - [ ] インスタンス間のプレゼンス情報同期
 - [ ] Docker Compose で複数インスタンスを起動してテスト
 
-```
-┌─────────────────────────────────────────────┐
-│              Redis Pub/Sub                  │
-│                                             │
-│  channel: room:{id}:messages                │
-│  channel: room:{id}:presence                │
-│  channel: room:{id}:typing                  │
-└─────────┬───────────────────┬───────────────┘
-          │                   │
-  ┌───────┴───────┐   ┌──────┴────────┐
-  │ realtime-svc  │   │ realtime-svc  │
-  │ インスタンス1 │   │ インスタンス2 │
-  │               │   │               │
-  │ Local Hub     │   │ Local Hub     │
-  │ ┌───┐ ┌───┐  │   │ ┌───┐ ┌───┐  │
-  │ │C1 │ │C2 │  │   │ │C3 │ │C4 │  │
-  │ └───┘ └───┘  │   │ └───┘ └───┘  │
-  └───────────────┘   └──────────────┘
+```mermaid
+graph TD
+    Redis["Redis Pub/Sub<br/>channel: room:{id}:messages<br/>channel: room:{id}:presence<br/>channel: room:{id}:typing"]
+
+    Redis <--> I1
+    Redis <--> I2
+
+    subgraph I1["realtime-svc インスタンス1"]
+        Hub1[Local Hub]
+        Hub1 --> C1[C1]
+        Hub1 --> C2[C2]
+    end
+
+    subgraph I2["realtime-svc インスタンス2"]
+        Hub2[Local Hub]
+        Hub2 --> C3[C3]
+        Hub2 --> C4[C4]
+    end
 ```
 
 **確認ポイント**: 異なるインスタンスに接続したクライアント間でメッセージが正しく配信されること。
@@ -395,29 +392,18 @@ Phase 3 完了時に以下が動作していること:
 
 ### サービス構成図（Phase 3 完了時）
 
-```
-                      WebSocket
-  クライアント ◄──────────────────► realtime-service (:8083)
-       │                                │
-       │ REST                     gRPC  │  Redis Pub/Sub
-       │                                │       │
-       ▼                                ▼       ▼
-  API Gateway (:8080)             ┌──────────────────┐
-       │                          │     Redis        │
-  ┌────┼────┐                     │  - Pub/Sub       │
-  │ gRPC    │ gRPC                │  - Presence      │
-  ▼         ▼                     │  - Typing State  │
-┌──────┐ ┌──────┐                 └──────────────────┘
-│user  │ │chat  │
-│svc   │ │svc   │
-│:9081 │ │:9082 │
-└──┬───┘ └──┬───┘
-   │        │
-   ▼        ▼
-┌──────┐ ┌──────┐
-│PG    │ │PG    │
-│(user)│ │(chat)│
-└──────┘ └──────┘
+```mermaid
+graph TD
+    Client[クライアント] <-->|WebSocket| RS["realtime-service (:8083)"]
+    Client -->|REST| GW["API Gateway (:8080)"]
+
+    RS <-->|Redis Pub/Sub| Redis["Redis<br/>Pub/Sub / Presence / Typing State"]
+
+    GW -->|gRPC| US["user-svc :9081"]
+    GW -->|gRPC| CS["chat-svc :9082"]
+
+    US --> PG1[("PG (user)")]
+    CS --> PG2[("PG (chat)")]
 ```
 
 ---

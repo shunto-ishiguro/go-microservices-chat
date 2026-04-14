@@ -9,12 +9,13 @@ Kustomize を使って dev / staging / prod の環境分離を実現する。
 
 ## Namespace 戦略
 
-```
-Namespace 構成:
-├── chat-app          # アプリケーションサービス（全6サービス）
-├── monitoring        # Prometheus, Grafana
-├── ingress-system    # Ingress Controller (AWS ALB)
-└── kube-system       # システムコンポーネント（既存）
+```mermaid
+graph TD
+    K8s[Kubernetes Cluster]
+    K8s --> NS1["chat-app<br/>アプリケーションサービス（全6サービス）"]
+    K8s --> NS2["monitoring<br/>Prometheus, Grafana"]
+    K8s --> NS3["ingress-system<br/>Ingress Controller (AWS ALB)"]
+    K8s --> NS4["kube-system<br/>システムコンポーネント（既存）"]
 ```
 
 **設計判断**: アプリケーションサービスを単一 Namespace `chat-app` にまとめる
@@ -298,16 +299,16 @@ spec:
 
 ### 通信マトリクス
 
-```
-         api-gw  user  chat  realtime  notif  media
-api-gw     -      →     →      →       →      →
-user       -      -     -      -       -      -
-chat       -      →     -      -       -      →
-realtime   -      →     -      -       -      -
-notif      -      -     -      -       -      -
-media      -      -     -      -       -      -
-
-→ = gRPC 通信を許可
+```mermaid
+graph LR
+    GW[api-gateway] -->|gRPC| US[user-service]
+    GW -->|gRPC| CS[chat-service]
+    GW -->|gRPC| RS[realtime-service]
+    GW -->|gRPC| NS[notification-service]
+    GW -->|gRPC| MS[media-service]
+    CS -->|gRPC| US
+    CS -->|gRPC| MS
+    RS -->|gRPC| US
 ```
 
 ---

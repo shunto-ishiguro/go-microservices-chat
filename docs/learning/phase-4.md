@@ -335,20 +335,21 @@ func (s *S3Storage) GenerateDownloadURL(ctx context.Context, key string) (string
 
 - [ ] 画像アップロードフロー:
 
-```
-クライアント                  media-service                 S3
-    │                              │                        │
-    │── POST /upload/request ────→│                        │
-    │                              │── Presigned URL 生成 ─→│
-    │←── Presigned URL ───────────│                        │
-    │                              │                        │
-    │── PUT (Presigned URL) ──────────────────────────────→│
-    │                              │                        │
-    │── POST /upload/complete ───→│                        │
-    │                              │── HeadObject 確認 ───→│
-    │                              │←── メタデータ ────────│
-    │                              │── DynamoDB に記録 ──→  │
-    │←── 完了レスポンス ──────────│                        │
+```mermaid
+sequenceDiagram
+    participant C as クライアント
+    participant M as media-service
+    participant S as S3
+
+    C->>M: POST /upload/request
+    M->>S: Presigned URL 生成
+    M->>C: Presigned URL
+    C->>S: PUT (Presigned URL)
+    C->>M: POST /upload/complete
+    M->>S: HeadObject 確認
+    S->>M: メタデータ
+    M->>M: DynamoDB に記録
+    M->>C: 完了レスポンス
 ```
 
 - [ ] ファイルメタデータの管理（DynamoDB に保存）
@@ -373,25 +374,15 @@ func (s *S3Storage) GenerateDownloadURL(ctx context.Context, key string) (string
 
 - [ ] イベント駆動アーキテクチャの設計:
 
-```
-┌──────────────┐    message.sent     ┌───────────┐
-│ chat-service │ ──── Publish ────→  │  SNS      │
-└──────────────┘                     │  Topic    │
-                                     └─────┬─────┘
-                                           │
-                          ┌────────────────┼────────────────┐
-                          │ Subscribe      │ Subscribe      │ Subscribe
-                          ▼                ▼                ▼
-                   ┌────────────┐  ┌────────────┐  ┌────────────┐
-                   │ SQS Queue  │  │ SQS Queue  │  │ SQS Queue  │
-                   │ notify     │  │ analytics  │  │ search     │
-                   └──────┬─────┘  └──────┬─────┘  └──────┬─────┘
-                          │               │               │
-                          ▼               ▼               ▼
-                   ┌────────────┐  ┌────────────┐  ┌────────────┐
-                   │notification│  │ analytics  │  │ search     │
-                   │ -service   │  │ -service   │  │ -service   │
-                   └────────────┘  └────────────┘  └────────────┘
+```mermaid
+graph TD
+    CS[chat-service] -->|"Publish: message.sent"| SNS[SNS Topic]
+    SNS -->|Subscribe| SQ1["SQS Queue<br/>notify"]
+    SNS -->|Subscribe| SQ2["SQS Queue<br/>analytics"]
+    SNS -->|Subscribe| SQ3["SQS Queue<br/>search"]
+    SQ1 --> NS[notification-service]
+    SQ2 --> AS[analytics-service]
+    SQ3 --> SS[search-service]
 ```
 
 - [ ] SNS Topic の作成とメッセージ発行:
@@ -564,20 +555,13 @@ func (c *SQSConsumer) Start(ctx context.Context) error {
 
 - [ ] デッドレターキュー (DLQ) の概念:
 
-```
-                    処理成功
-SQS Queue ──→ Consumer ──→ DeleteMessage
-    │              │
-    │          処理失敗（N回リトライ後）
-    │              │
-    │              ▼
-    │         maxReceiveCount 超過
-    │              │
-    └──────────────▼
-           DLQ (Dead Letter Queue)
-                   │
-                   ▼
-            アラート / 手動調査
+```mermaid
+graph TD
+    SQS[SQS Queue] --> Consumer
+    Consumer -->|処理成功| Del[DeleteMessage]
+    Consumer -->|"処理失敗（N回リトライ後）"| Max[maxReceiveCount 超過]
+    Max --> DLQ["DLQ (Dead Letter Queue)"]
+    DLQ --> Alert["アラート / 手動調査"]
 ```
 
 - [ ] DLQ の設定:
@@ -718,37 +702,28 @@ Phase 4 完了時に以下が動作していること:
 
 ### サービス構成図（Phase 4 完了時）
 
-```
-                      WebSocket
-  クライアント ◄──────────────────► realtime-service (:8083)
-       │                                │
-       │ REST                     gRPC  │  Redis Pub/Sub
-       │                                │       │
-       ▼                                ▼       ▼
-  API Gateway (:8080)             ┌──────────────────┐
-       │                          │     Redis        │
-  ┌────┼────────┬────────┐        └──────────────────┘
-  │    │        │        │
-  ▼    ▼        ▼        ▼
-┌────┐┌────┐ ┌─────┐ ┌──────────────┐
-│user││chat│ │media│ │notification  │
-│svc ││svc │ │svc  │ │   svc        │
-└─┬──┘└─┬──┘ └──┬──┘ └──────┬───────┘
-  │     │       │            │
-  │     │       │       SQS Consumer
-  │     │       │            │
-  ▼     ▼       ▼            ▼
-┌─────────┐  ┌────┐   ┌──────────┐   ┌─────────────┐
-│DynamoDB │  │ S3 │   │   SQS    │   │    SNS      │
-│         │  │    │   │ (Queue)  │←──│  (Topic)    │
-└─────────┘  └────┘   └──────────┘   └─────────────┘
-                                           ↑
-                                     chat-service
-                                     (Publish)
+```mermaid
+graph TD
+    Client[クライアント] <-->|WebSocket| RS["realtime-service (:8083)"]
+    Client -->|REST| GW["API Gateway (:8080)"]
 
-  ┌──────────────────┐
-  │ Amazon Cognito   │ ← JWT 発行 / 検証
-  └──────────────────┘
+    RS <-->|Redis Pub/Sub| Redis[Redis]
+
+    GW --> US[user-svc]
+    GW --> CS[chat-svc]
+    GW --> MS[media-svc]
+    GW --> NS[notification-svc]
+
+    US --> DDB[DynamoDB]
+    CS --> DDB
+    NS --> DDB
+    MS --> S3[S3]
+
+    CS -->|Publish| SNS["SNS (Topic)"]
+    SNS --> SQS["SQS (Queue)"]
+    SQS -->|SQS Consumer| NS
+
+    Cognito["Amazon Cognito<br/>JWT 発行 / 検証"]
 ```
 
 ---

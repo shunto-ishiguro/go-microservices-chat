@@ -280,17 +280,26 @@
 
 ## 学習ロードマップ
 
-```
-Month 1-2:   Phase 1 (Go 基礎)
-Month 3-4:   Phase 2 (gRPC)
-Month 5-6:   Phase 3 (リアルタイム)
-Month 7-9:   Phase 4 (AWS)           → SAA-C03 受験準備開始
-Month 10-12: Phase 5 (Kubernetes)     → CKA/CKAD 受験準備開始
-Month 13-15: Phase 6 (Terraform+CI/CD)
+```mermaid
+gantt
+    title 学習ロードマップ
+    dateFormat YYYY-MM
+    axisFormat %m月
 
-Month 10:    SAA-C03 受験
-Month 14:    CKAD 受験（CKA より先に受験推奨）
-Month 16:    CKA 受験
+    section 開発フェーズ
+    Phase 1 (Go 基礎)          :p1, 2025-01, 2M
+    Phase 2 (gRPC)              :p2, after p1, 2M
+    Phase 3 (リアルタイム)       :p3, after p2, 2M
+    Phase 4 (AWS)               :p4, after p3, 3M
+    Phase 5 (Kubernetes)        :p5, after p4, 3M
+    Phase 6 (Terraform+CI/CD)   :p6, after p5, 3M
+
+    section 認定試験
+    SAA-C03 受験準備            :crit, saa_prep, 2025-07, 3M
+    SAA-C03 受験                :milestone, saa, 2025-10, 0d
+    CKA/CKAD 受験準備           :crit, cka_prep, 2025-10, 4M
+    CKAD 受験                   :milestone, ckad, 2026-02, 0d
+    CKA 受験                    :milestone, cka, 2026-04, 0d
 ```
 
 > 期間は目安。個人のペースに合わせて調整すること。
