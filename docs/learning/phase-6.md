@@ -38,13 +38,11 @@ Terraform の基本概念と HCL (HashiCorp Configuration Language) 構文を学
 - [ ] Terraform とは何か（Infrastructure as Code, 宣言的インフラ管理）
 - [ ] Terraform のワークフロー:
 
-```
-  ┌────────┐     ┌────────┐     ┌────────┐     ┌────────┐
-  │  Write │ ──→ │  Init  │ ──→ │  Plan  │ ──→ │ Apply  │
-  │ (.tf)  │     │        │     │        │     │        │
-  └────────┘     └────────┘     └────────┘     └────────┘
-                 プロバイダー     変更内容の      インフラへの
-                 のDL            プレビュー      変更適用
+```mermaid
+graph LR
+    W["Write (.tf)"] --> I["Init<br/>プロバイダーのDL"]
+    I --> P["Plan<br/>変更内容のプレビュー"]
+    P --> A["Apply<br/>インフラへの変更適用"]
 ```
 
 - [ ] HCL 構文の基礎:
@@ -382,16 +380,14 @@ terraform apply -var-file="environments/prod.tfvars"
 
 - [ ] 変更管理のフロー:
 
-```
-  ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌──────────┐
-  │ 1. 変更  │ ──→ │ 2. PR    │ ──→ │ 3. Plan  │ ──→ │ 4. Review│
-  │ (.tf)    │     │ 作成     │     │ (自動)   │     │ (手動)   │
-  └──────────┘     └──────────┘     └──────────┘     └──────────┘
-                                                          │
-  ┌──────────┐     ┌──────────┐     ┌──────────┐         │
-  │ 7. 確認  │ ←── │ 6. Apply │ ←── │ 5. Merge │ ←──────┘
-  │          │     │ (自動)   │     │          │
-  └──────────┘     └──────────┘     └──────────┘
+```mermaid
+graph LR
+    A["1. 変更 (.tf)"] --> B["2. PR 作成"]
+    B --> C["3. Plan (自動)"]
+    C --> D["4. Review (手動)"]
+    D --> E["5. Merge"]
+    E --> F["6. Apply (自動)"]
+    F --> G["7. 確認"]
 ```
 
 - [ ] `terraform plan` の出力の読み方:
@@ -441,19 +437,13 @@ OpenTelemetry を使って、トレース、メトリクス、ログを統合的
 
 - [ ] 可観測性の3本柱:
 
-```
-        ┌─────────────────────────────────────────────┐
-        │               可観測性 (Observability)       │
-        │                                             │
-        │  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
-        │  │ トレース  │  │メトリクス│  │  ログ    │  │
-        │  │          │  │          │  │          │  │
-        │  │ "何が    │  │ "どれだ  │  │ "何が    │  │
-        │  │  起きた  │  │  け使わ  │  │  起きた  │  │
-        │  │  か"     │  │  れてる  │  │  のか"   │  │
-        │  │ (経路)   │  │  か"     │  │ (詳細)   │  │
-        │  └──────────┘  └──────────┘  └──────────┘  │
-        └─────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Obs["可観測性 (Observability)"]
+        T["トレース<br/>何が起きたか (経路)"]
+        M["メトリクス<br/>どれだけ使われてるか"]
+        L["ログ<br/>何が起きたのか (詳細)"]
+    end
 ```
 
 - [ ] Go アプリケーションへの OpenTelemetry SDK 導入:
@@ -792,21 +782,13 @@ groups:
 - [ ] GitHub Actions の基礎概念（Workflow, Job, Step, Action）
 - [ ] CI パイプラインの設計:
 
-```
-  Push / PR
-      │
-      ▼
-  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐
-  │  Lint    │ ──→│  Test    │ ──→│  Build   │ ──→│Push ECR  │
-  │          │    │          │    │  Image   │    │          │
-  │ golangci │    │ go test  │    │ docker   │    │ ECR push │
-  │ -lint    │    │ -race    │    │ build    │    │          │
-  └──────────┘    └──────────┘    └──────────┘    └──────────┘
-                       │
-                  ┌────┴────┐
-                  │LocalStack│
-                  │(統合テスト)│
-                  └─────────┘
+```mermaid
+graph LR
+    Trigger["Push / PR"] --> Lint["Lint<br/>golangci-lint"]
+    Lint --> Test["Test<br/>go test -race"]
+    Test --> Build["Build Image<br/>docker build"]
+    Build --> Push["Push ECR<br/>ECR push"]
+    Test --- LS["LocalStack<br/>(統合テスト)"]
 ```
 
 - [ ] CI ワークフローの実装:
@@ -918,24 +900,12 @@ EKS へのデプロイを自動化する CD パイプラインを構築する。
 
 - [ ] CD パイプラインの設計:
 
-```
-  main ブランチへの Push
-      │
-      ▼
-  ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-  │ Update Image │ ──→ │ Kustomize    │ ──→ │ Deploy to    │
-  │ Tag          │     │ Build        │     │ EKS          │
-  │              │     │              │     │              │
-  │ kustomize    │     │ kustomize    │     │ kubectl      │
-  │ edit set     │     │ build        │     │ apply        │
-  │ image        │     │              │     │              │
-  └──────────────┘     └──────────────┘     └──────────────┘
-                                                   │
-                                            ┌──────┴──────┐
-                                            │ Verify      │
-                                            │ rollout     │
-                                            │ status      │
-                                            └─────────────┘
+```mermaid
+graph LR
+    Trigger["main ブランチへの Push"] --> Update["Update Image Tag<br/>kustomize edit set image"]
+    Update --> Build["Kustomize Build<br/>kustomize build"]
+    Build --> Deploy["Deploy to EKS<br/>kubectl apply"]
+    Deploy --> Verify["Verify<br/>rollout status"]
 ```
 
 - [ ] CD ワークフローの実装:
@@ -1037,26 +1007,19 @@ OpenTelemetry を活用して、リクエストのエンドツーエンド追跡
 
 - [ ] 分散トレーシングのアーキテクチャ:
 
-```
-  クライアント → API Gateway → user-service → DynamoDB
-       │              │              │
-       │         trace-id: abc  trace-id: abc
-       │         span: gateway  span: get-user
-       │              │              │
-       │              └──── 全て同じ trace-id で紐付く ────┘
-       │
-       ▼
-  ┌─────────────────────────────────────────────────┐
-  │ OpenTelemetry Collector                          │
-  │   受信 → 処理 → エクスポート                     │
-  └──────────┬────────────────┬──────────────────────┘
-             │                │
-             ▼                ▼
-       ┌──────────┐    ┌──────────┐
-       │ Jaeger   │    │ AWS      │
-       │ (dev)    │    │ X-Ray    │
-       │          │    │ (prod)   │
-       └──────────┘    └──────────┘
+```mermaid
+graph TD
+    C[クライアント] -->|"trace-id: abc"| GW["API Gateway<br/>span: gateway"]
+    GW -->|"trace-id: abc"| US["user-service<br/>span: get-user"]
+    US --> DDB[DynamoDB]
+
+    Note["全て同じ trace-id で紐付く"]
+
+    GW --> OTel["OpenTelemetry Collector<br/>受信 → 処理 → エクスポート"]
+    US --> OTel
+
+    OTel --> Jaeger["Jaeger (dev)"]
+    OTel --> XRay["AWS X-Ray (prod)"]
 ```
 
 - [ ] OpenTelemetry Collector の設定:
@@ -1162,42 +1125,42 @@ Phase 6 完了時に以下が動作していること:
 
 ### 最終アーキテクチャ図（Phase 6 完了時）
 
-```
-  ┌─── GitHub ──────────────────────────────────────────────────────┐
-  │                                                                  │
-  │  Push → CI (lint/test/build) → ECR Push → CD (deploy to EKS)   │
-  │                                                                  │
-  └──────────────────────────────┬───────────────────────────────────┘
-                                 │
-  ┌────────── Terraform で管理 ──┼──────────────────────────────────┐
-  │                              │                                  │
-  │                     ┌────────┴────────┐                         │
-  │        Internet ──→ │    AWS ALB      │                         │
-  │                     └────────┬────────┘                         │
-  │                              │                                  │
-  │  ┌──── EKS Cluster ─────────┼───────────────────────────────┐  │
-  │  │                           │                               │  │
-  │  │  ┌─────────┐  ┌────────┐ │ ┌─────────┐  ┌────────────┐  │  │
-  │  │  │api-gw   │  │user-svc│ │ │chat-svc │  │realtime-svc│  │  │
-  │  │  └────┬────┘  └───┬────┘ │ └────┬────┘  └─────┬──────┘  │  │
-  │  │       │            │      │      │             │          │  │
-  │  │  ┌────┴────┐  ┌───┴────┐ │ ┌────┴────┐  ┌────┴─────┐   │  │
-  │  │  │media-svc│  │notif   │ │ │OTel     │  │Prometheus│   │  │
-  │  │  └─────────┘  │svc     │ │ │Collector│  │+ Grafana │   │  │
-  │  │               └────────┘ │ └─────────┘  └──────────┘   │  │
-  │  └──────────────────────────┼──────────────────────────────┘  │
-  │                              │                                  │
-  │  ┌── AWS マネージドサービス ─┼──────────────────────────────┐  │
-  │  │                           │                               │  │
-  │  │  ┌─────────┐ ┌───────┐ ┌┴──────┐ ┌────────┐ ┌────────┐ │  │
-  │  │  │DynamoDB │ │  S3   │ │SQS/SNS│ │Cognito │ │ElastiC.│ │  │
-  │  │  └─────────┘ └───────┘ └───────┘ └────────┘ │(Redis) │ │  │
-  │  │                                               └────────┘ │  │
-  │  │  ┌─────────┐ ┌───────┐                                   │  │
-  │  │  │  ECR    │ │X-Ray  │                                   │  │
-  │  │  └─────────┘ └───────┘                                   │  │
-  │  └───────────────────────────────────────────────────────────┘  │
-  └─────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph GitHub
+        CI["Push → CI (lint/test/build) → ECR Push → CD (deploy to EKS)"]
+    end
+
+    GitHub --> ALB
+
+    subgraph Terraform["Terraform で管理"]
+        Internet --> ALB[AWS ALB]
+
+        subgraph EKS["EKS Cluster"]
+            GW[api-gw]
+            US[user-svc]
+            CS[chat-svc]
+            RS[realtime-svc]
+            MS[media-svc]
+            NS[notif-svc]
+            OTel[OTel Collector]
+            Prom["Prometheus + Grafana"]
+        end
+
+        ALB --> EKS
+
+        subgraph AWS["AWS マネージドサービス"]
+            DDB[DynamoDB]
+            S3[S3]
+            SQSSNS[SQS/SNS]
+            Cognito[Cognito]
+            Redis["ElastiCache (Redis)"]
+            ECR[ECR]
+            XRay[X-Ray]
+        end
+
+        EKS --> AWS
+    end
 ```
 
 ---

@@ -139,17 +139,11 @@ chat-service から user-service を gRPC で呼び出す。
 - [ ] リトライロジック（基本的な再試行）
 - [ ] サーキットブレーカーの概念理解（実装は後のフェーズ）
 
-```
-┌──────────────┐     gRPC      ┌──────────────┐
-│ chat-service │ ──────────→  │ user-service │
-│   :9082      │               │   :9081      │
-└──────────────┘               └──────────────┘
-       │                              │
-       ▼                              ▼
-  ┌──────────┐                 ┌──────────┐
-  │PostgreSQL│                 │PostgreSQL│
-  │ (chat)   │                 │ (user)   │
-  └──────────┘                 └──────────┘
+```mermaid
+graph TD
+    CS["chat-service<br/>:9082"] -->|gRPC| US["user-service<br/>:9081"]
+    CS --> PG1[("PostgreSQL<br/>(chat)")]
+    US --> PG2[("PostgreSQL<br/>(user)")]
 ```
 
 **確認ポイント**: chat-service がユーザー情報を user-service から取得してルーム作成できること。
@@ -278,26 +272,14 @@ Phase 2 完了時に以下が動作していること:
 
 ### サービス構成図
 
-```
-                  REST
-  クライアント ──────────→ API Gateway (:8080)
-                              │
-                 ┌────────────┼────────────┐
-                 │ gRPC       │ gRPC       │
-                 ▼            ▼            │
-          ┌────────────┐ ┌────────────┐   │
-          │user-service│ │chat-service│   │
-          │ REST :8081 │ │ REST :8082 │   │
-          │ gRPC :9081 │ │ gRPC :9082 │   │
-          └─────┬──────┘ └─────┬──────┘   │
-                │              │           │
-                ▼              ▼           │
-          ┌──────────┐  ┌──────────┐      │
-          │PostgreSQL│  │PostgreSQL│      │
-          │  (user)  │  │  (chat)  │      │
-          └──────────┘  └──────────┘      │
-                                          │
-           chat-service ──gRPC──→ user-service
+```mermaid
+graph TD
+    Client[クライアント] -->|REST| GW["API Gateway (:8080)"]
+    GW -->|gRPC| US["user-service<br/>REST :8081 / gRPC :9081"]
+    GW -->|gRPC| CS["chat-service<br/>REST :8082 / gRPC :9082"]
+    US --> PG1[("PostgreSQL (user)")]
+    CS --> PG2[("PostgreSQL (chat)")]
+    CS -->|gRPC| US
 ```
 
 ---

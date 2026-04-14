@@ -239,32 +239,36 @@ Kubernetes の核となるリソースと概念を理解する。
 - [ ] Kubernetes とは何か（コンテナオーケストレーション）
 - [ ] アーキテクチャの概要:
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  Control Plane                       │
-│  ┌──────────┐ ┌──────────┐ ┌────────────┐          │
-│  │ API      │ │ etcd     │ │ Controller │          │
-│  │ Server   │ │          │ │ Manager    │          │
-│  └──────────┘ └──────────┘ └────────────┘          │
-│  ┌──────────┐                                       │
-│  │Scheduler │                                       │
-│  └──────────┘                                       │
-└────────────────────────┬────────────────────────────┘
-                         │
-         ┌───────────────┼───────────────┐
-         │               │               │
-    ┌────┴────┐    ┌────┴────┐    ┌────┴────┐
-    │ Node 1  │    │ Node 2  │    │ Node 3  │
-    │┌───┐┌──┐│    │┌───┐┌──┐│    │┌───┐┌──┐│
-    ││Pod││  ││    ││Pod││  ││    ││Pod││  ││
-    │└───┘│  ││    │└───┘│  ││    │└───┘│  ││
-    │┌───┐│  ││    │┌───┐│  ││    │┌───┐│  ││
-    ││Pod│└──┘│    ││Pod│└──┘│    ││Pod│└──┘│
-    │└───┘    │    │└───┘    │    │└───┘    │
-    │ kubelet │    │ kubelet │    │ kubelet │
-    │ kube-   │    │ kube-   │    │ kube-   │
-    │ proxy   │    │ proxy   │    │ proxy   │
-    └─────────┘    └─────────┘    └─────────┘
+```mermaid
+graph TD
+    subgraph CP["Control Plane"]
+        API[API Server]
+        ETCD[etcd]
+        CM[Controller Manager]
+        Sched[Scheduler]
+    end
+
+    CP --> N1
+    CP --> N2
+    CP --> N3
+
+    subgraph N1["Node 1"]
+        P1A[Pod]
+        P1B[Pod]
+        K1["kubelet / kube-proxy"]
+    end
+
+    subgraph N2["Node 2"]
+        P2A[Pod]
+        P2B[Pod]
+        K2["kubelet / kube-proxy"]
+    end
+
+    subgraph N3["Node 3"]
+        P3A[Pod]
+        P3B[Pod]
+        K3["kubelet / kube-proxy"]
+    end
 ```
 
 - [ ] 主要リソースの理解:
@@ -550,25 +554,10 @@ func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 
 - [ ] HPA の概念と仕組み:
 
-```
-              ┌──────────────────┐
-              │ Metrics Server   │
-              │ (CPU/Memory)     │
-              └────────┬─────────┘
-                       │ メトリクス収集
-                       ▼
-              ┌──────────────────┐
-              │ HPA Controller   │
-              │                  │
-              │ 目標: CPU 70%    │
-              │ min: 2, max: 10  │
-              └────────┬─────────┘
-                       │ レプリカ数調整
-                       ▼
-              ┌──────────────────┐
-              │ Deployment       │
-              │ replicas: N      │
-              └──────────────────┘
+```mermaid
+graph TD
+    MS["Metrics Server<br/>(CPU/Memory)"] -->|メトリクス収集| HPA["HPA Controller<br/>目標: CPU 70%<br/>min: 2, max: 10"]
+    HPA -->|レプリカ数調整| Deploy["Deployment<br/>replicas: N"]
 ```
 
 - [ ] Metrics Server のインストール
@@ -898,16 +887,12 @@ Kubernetes の ServiceAccount に IAM ロールを紐付け、Pod から AWS サ
 
 - [ ] IRSA の概念と仕組み:
 
-```
-┌─────────────────────┐     Assume Role    ┌──────────────┐
-│ Pod                  │ ──────────────→    │ IAM Role     │
-│  └─ ServiceAccount   │    (OIDC)          │ (per-service)│
-│     └─ annotation:   │                    │              │
-│        eks.amazonaws  │                    │ Policy:      │
-│        .com/role-arn  │                    │ - DynamoDB   │
-│                       │                    │ - S3         │
-└─────────────────────┘                    │ - SQS/SNS   │
-                                            └──────────────┘
+```mermaid
+graph LR
+    subgraph Pod
+        SA["ServiceAccount<br/>annotation: eks.amazonaws.com/role-arn"]
+    end
+    Pod -->|"Assume Role (OIDC)"| IAM["IAM Role (per-service)<br/>Policy:<br/>- DynamoDB<br/>- S3<br/>- SQS/SNS"]
 ```
 
 - [ ] OIDC プロバイダーの設定（EKS クラスター作成時に自動設定）
@@ -1049,39 +1034,29 @@ Phase 5 完了時に以下が動作していること:
 
 ### サービス構成図（Phase 5 完了時 - EKS 上）
 
-```
-                    Internet
-                       │
-                       ▼
-              ┌────────────────┐
-              │   AWS ALB      │
-              │  (Ingress)     │
-              └───────┬────────┘
-                      │
-  ┌───────────────────┼─────── EKS Cluster ──────────────────────┐
-  │                   │                                           │
-  │    ┌──────────────┼──────────────┐                           │
-  │    │              ▼              │                           │
-  │    │    ┌──────────────────┐     │                           │
-  │    │    │   api-gateway    │     │                           │
-  │    │    └────────┬─────────┘     │                           │
-  │    │        gRPC │               │                           │
-  │    │    ┌────────┼────────┐      │                           │
-  │    │    ▼        ▼        ▼      │                           │
-  │    │ ┌──────┐ ┌──────┐ ┌──────┐ │  ┌──────────┐ ┌────────┐ │
-  │    │ │user  │ │chat  │ │real  │ │  │media     │ │notif   │ │
-  │    │ │svc   │ │svc   │ │time  │ │  │svc       │ │svc     │ │
-  │    │ └──┬───┘ └──┬───┘ └──┬───┘ │  └────┬─────┘ └───┬────┘ │
-  │    │    │IRSA    │IRSA    │     │       │IRSA       │IRSA  │
-  │    └────┼────────┼────────┼─────┘       │           │      │
-  │         │        │        │             │           │      │
-  └─────────┼────────┼────────┼─────────────┼───────────┼──────┘
-            │        │        │             │           │
-            ▼        ▼        ▼             ▼           ▼
-      ┌──────────┐ ┌─────┐ ┌─────┐   ┌──────┐   ┌──────────┐
-      │ DynamoDB │ │Redis│ │Redis│   │  S3  │   │ SQS/SNS  │
-      └──────────┘ └─────┘ └─────┘   └──────┘   └──────────┘
-                                          Cognito
+```mermaid
+graph TD
+    Internet --> ALB["AWS ALB (Ingress)"]
+
+    ALB --> GW
+
+    subgraph EKS["EKS Cluster"]
+        GW[api-gateway]
+        GW -->|gRPC| US[user-svc]
+        GW -->|gRPC| CS[chat-svc]
+        GW -->|gRPC| RS[realtime-svc]
+        MS[media-svc]
+        NS[notif-svc]
+    end
+
+    US -->|IRSA| DDB[DynamoDB]
+    CS -->|IRSA| DDB
+    CS -->|IRSA| Redis1[Redis]
+    RS -->|IRSA| Redis2[Redis]
+    MS -->|IRSA| S3[S3]
+    NS -->|IRSA| SQSSNS[SQS/SNS]
+
+    Cognito[Cognito]
 ```
 
 ---

@@ -139,14 +139,10 @@
 
 サービス間の直接的なリクエスト/レスポンスが必要な場合に使用。
 
-```
-┌──────────────┐  gRPC (GetUser)   ┌──────────────┐
-│ Chat Service │ ──────────────── → │ User Service │
-└──────────────┘                    └──────────────┘
-
-┌──────────────┐  gRPC (GetPresignedURL)  ┌──────────────┐
-│ Chat Service │ ────────────────────── → │ Media Service│
-└──────────────┘                          └──────────────┘
+```mermaid
+graph LR
+    CS1[Chat Service] -->|"gRPC (GetUser)"| US[User Service]
+    CS2[Chat Service] -->|"gRPC (GetPresignedURL)"| MS[Media Service]
 ```
 
 **使用場面**:
@@ -162,14 +158,15 @@
 
 疎結合が必要な場合、または複数サービスへのファンアウトが必要な場合に使用。
 
-```
-                         ┌─── SQS ──→ Notification Service
-Chat Service → SNS Topic ─┤
-                         └─── SQS ──→ Realtime Service
+```mermaid
+graph LR
+    CS[Chat Service] --> SNS1[SNS Topic]
+    SNS1 -->|SQS| NS[Notification Service]
+    SNS1 -->|SQS| RS[Realtime Service]
 
-                         ┌─── SQS ──→ Media Service (リサイズ)
-Media Service → SNS Topic┤
-                         └─── SQS ──→ Chat Service (メタデータ更新)
+    MS[Media Service] --> SNS2[SNS Topic]
+    SNS2 -->|SQS| MS2["Media Service (リサイズ)"]
+    SNS2 -->|SQS| CS2["Chat Service (メタデータ更新)"]
 ```
 
 **イベント定義**:
@@ -185,31 +182,21 @@ Media Service → SNS Topic┤
 
 同一サービスの複数インスタンス間でリアルタイムデータを共有する場合に使用。
 
-```
-Realtime Service (Pod A) ─── Redis Pub/Sub ─── Realtime Service (Pod B)
-                               │
-                          プレゼンス情報
-                          メッセージ配信
+```mermaid
+graph LR
+    A["Realtime Service (Pod A)"] <-->|"プレゼンス情報<br/>メッセージ配信"| R[Redis Pub/Sub]
+    R <--> B["Realtime Service (Pod B)"]
 ```
 
 ## Database-per-Service パターン
 
 各サービスが独自のデータストアを所有し、他サービスのデータには API 経由でのみアクセスする。
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│ User Service │     │ Chat Service │     │Notification  │
-│              │     │              │     │   Service    │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                     │
-       ▼                    ▼                     ▼
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│  PostgreSQL  │     │  PostgreSQL  │     │   DynamoDB   │
-│   (users)    │     │  (messages)  │     │(notifications│
-│              │     │  → DynamoDB  │     │              │
-└──────────────┘     └──────────────┘     └──────────────┘
-  ✕ 他サービスが       ✕ 他サービスが       ✕ 他サービスが
-  直接アクセス禁止     直接アクセス禁止     直接アクセス禁止
+```mermaid
+graph TD
+    US[User Service] --> PG1[("PostgreSQL<br/>(users)<br/>✕ 他サービス直接アクセス禁止")]
+    CS[Chat Service] --> PG2[("PostgreSQL (messages)<br/>→ DynamoDB<br/>✕ 他サービス直接アクセス禁止")]
+    NS[Notification Service] --> DDB[("DynamoDB<br/>(notifications)<br/>✕ 他サービス直接アクセス禁止")]
 ```
 
 **原則**:

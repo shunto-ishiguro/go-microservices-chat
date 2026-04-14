@@ -71,42 +71,28 @@
 
 ## アーキテクチャ図（AWS サービスマッピング）
 
-```
-                    ┌─────────────┐
-                    │  Route 53   │
-                    └──────┬──────┘
-                           │
-                    ┌──────▼──────┐
-                    │     ALB     │ ← ACM (TLS)
-                    └──────┬──────┘
-                           │
-              ┌────────────▼────────────┐
-              │      Amazon EKS         │
-              │  ┌─────────────────┐    │
-              │  │  API Gateway    │    │
-              │  │  User Service   │    │
-              │  │  Chat Service   │    │
-              │  │  Realtime Svc   │    │
-              │  │  Notification   │    │
-              │  │  Media Service  │    │
-              │  └─────────────────┘    │
-              └─┬───┬───┬───┬───┬──────┘
-                │   │   │   │   │
-         ┌──────┘   │   │   │   └──────┐
-         ▼          ▼   │   ▼          ▼
-   ┌──────────┐┌──────┐│┌──────┐┌──────────┐
-   │   RDS    ││DynamoDB││  S3  ││ElastiCache│
-   │(Postgres)││      │││      ││  (Redis)  │
-   └──────────┘└──────┘│└──────┘└──────────┘
-                       │
-                ┌──────▼──────┐
-                │  SQS / SNS  │
-                └─────────────┘
+```mermaid
+graph TD
+    R53[Route 53] --> ALB["ALB ← ACM (TLS)"]
+    ALB --> EKS
 
-         ┌──────────┐  ┌────────────────┐
-         │ Cognito  │  │ CloudWatch     │
-         │ (認証)   │  │ X-Ray (トレース)│
-         └──────────┘  └────────────────┘
+    subgraph EKS["Amazon EKS"]
+        GW[API Gateway]
+        US[User Service]
+        CS[Chat Service]
+        RS[Realtime Svc]
+        NS[Notification]
+        MS[Media Service]
+    end
+
+    EKS --> RDS["RDS (PostgreSQL)"]
+    EKS --> DDB[DynamoDB]
+    EKS --> S3[S3]
+    EKS --> ElastiCache["ElastiCache (Redis)"]
+    EKS --> SQSSNS[SQS / SNS]
+
+    Cognito["Cognito (認証)"]
+    CW["CloudWatch / X-Ray (トレース)"]
 ```
 
 ---
