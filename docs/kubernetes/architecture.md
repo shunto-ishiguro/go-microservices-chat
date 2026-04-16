@@ -481,4 +481,3 @@ metadata:
 - [アーキテクチャ概要](../architecture/overview.md)
 - [ディレクトリ構成](../architecture/directory-structure.md)
 - [Terraform 構成](../terraform/structure.md)
-- [認定試験マッピング](../learning/certification-mapping.md)
