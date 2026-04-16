@@ -164,4 +164,3 @@ graph TD
 - [アーキテクチャ概要](../architecture/overview.md)
 - [DynamoDB 設計詳細](./dynamodb-design.md)
 - [Terraform 構成](../terraform/structure.md)
-- [認定試験マッピング](../learning/certification-mapping.md)
