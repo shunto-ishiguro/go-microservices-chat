@@ -51,7 +51,7 @@ Go の型システムと主要な言語機能を学ぶ。
 - [ ] インターフェース（interface）の定義と実装
 - [ ] エラーハンドリング（`error` 型, `errors.New`, `fmt.Errorf`, `%w`）
 - [ ] ポインタの基礎
-- [ ] goroutine と channel の基礎（概念理解のみ、本格活用は Phase 3）
+- [ ] goroutine と channel の基礎（概念理解のみ、本格活用は Phase 4）
 
 **確認ポイント**: 構造体にメソッドを定義し、インターフェースを満たす実装ができること。
 
@@ -268,4 +268,4 @@ services/user-service/
 
 ## 次のフェーズ
 
-Phase 1 が完了したら [Phase 2: gRPC + マルチサービス](./phase-2.md) に進む。
+Phase 1 が完了したら [Phase 2: 認証・認可 (自前 JWT + bcrypt)](./phase-2.md) に進む。
