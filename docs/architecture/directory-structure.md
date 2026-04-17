@@ -12,16 +12,10 @@ go-microservices-chat/
 ├── README.md
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml                   # CI パイプライン
-│       ├── cd-dev.yml               # dev 環境デプロイ
-│       ├── cd-staging.yml           # staging 環境デプロイ
-│       └── cd-prod.yml             # prod 環境デプロイ
+│       └── ci.yml                   # CI: lint + test + buf lint
 │
 ├── docs/                            # 設計ドキュメント
 │   ├── architecture/
-│   ├── aws/
-│   ├── kubernetes/
-│   ├── terraform/
 │   └── learning/
 │
 ├── proto/                           # Protocol Buffers 定義（共有）
@@ -29,119 +23,95 @@ go-microservices-chat/
 │   ├── buf.gen.yaml                 # コード生成設定
 │   ├── user/
 │   │   └── v1/
-│   │       └── user.proto
+│   │       └── user.proto           # (Phase 3 で使用)
 │   ├── chat/
 │   │   └── v1/
-│   │       └── chat.proto
-│   ├── realtime/
-│   │   └── v1/
-│   │       └── realtime.proto
-│   ├── notification/
-│   │   └── v1/
-│   │       └── notification.proto
-│   └── media/
+│   │       └── chat.proto           # (Phase 3 で追加)
+│   └── realtime/
 │       └── v1/
-│           └── media.proto
+│           └── realtime.proto       # (Phase 4 で追加)
+│
+├── gen/                             # proto 生成コード (Go モジュール)
+│   ├── go.mod
+│   └── go/
+│       ├── user/v1/
+│       ├── chat/v1/
+│       └── realtime/v1/
 │
 ├── pkg/                             # 共有パッケージ
 │   ├── go.mod
 │   ├── go.sum
+│   ├── auth/                        # (Phase 2) JWT 発行・検証
+│   │   ├── claims.go
+│   │   ├── issuer.go
+│   │   └── verifier.go
 │   ├── logger/                      # 構造化ログ (slog)
-│   │   └── logger.go
-│   ├── middleware/                   # 共通ミドルウェア
-│   │   ├── auth.go                  # JWT 検証
+│   ├── middleware/                  # 共通ミドルウェア
+│   │   ├── auth.go                  # JWT 検証 (Phase 2)
 │   │   ├── logging.go               # リクエストログ
 │   │   ├── recovery.go              # パニックリカバリ
 │   │   └── cors.go                  # CORS 設定
-│   ├── config/                      # 設定管理
-│   │   └── config.go
+│   ├── config/                      # 設定管理 (環境変数)
 │   ├── errors/                      # 共通エラー型
-│   │   └── errors.go
-│   ├── pagination/                  # ページネーション
-│   │   └── cursor.go
+│   ├── pagination/                  # ページネーション (cursor)
 │   └── testutil/                    # テストユーティリティ
-│       ├── db.go                    # テスト用 DB ヘルパー
-│       └── grpc.go                  # テスト用 gRPC ヘルパー
 │
 ├── services/                        # マイクロサービス群
-│   ├── user-service/
-│   ├── chat-service/
-│   ├── realtime-service/
-│   ├── notification-service/
-│   ├── media-service/
-│   └── api-gateway/
-│
-├── terraform/                       # Infrastructure as Code
-│   ├── modules/
-│   └── environments/
-│
-├── kubernetes/                      # Kubernetes マニフェスト
-│   ├── base/
-│   └── overlays/
+│   ├── user-service/                # (Phase 1 完了, Phase 2 で認証追加)
+│   ├── chat-service/                # (Phase 3 で追加)
+│   ├── realtime-service/            # (Phase 4 で追加)
+│   └── api-gateway/                 # (Phase 3 で追加)
 │
 ├── scripts/                         # ユーティリティスクリプト
 │   ├── setup-local.sh               # ローカル環境セットアップ
 │   ├── migrate.sh                   # DB マイグレーション
 │   └── generate-proto.sh            # Proto コード生成
 │
-└── docker-compose.yml               # ローカル開発用
+└── docker-compose.yml               # ローカル開発用 (PostgreSQL, Redis)
 ```
 
 ## サービスの内部構成
 
-各マイクロサービスは以下の統一的な構成に従う。
+各マイクロサービスは以下の統一的な構成に従う (Phase 1 の user-service が基準)。
 
 ```
 services/user-service/
 ├── go.mod                           # サービス固有の依存管理
 ├── go.sum
-├── Dockerfile                       # マルチステージビルド
-├── Makefile                         # サービス固有タスク
+├── Dockerfile                       # マルチステージビルド (任意、本プロジェクトでは docker compose から build)
 ├── cmd/
 │   └── server/
-│       └── main.go                  # エントリーポイント
+│       └── main.go                  # エントリーポイント (DI とサーバー起動)
 ├── internal/                        # 非公開パッケージ（外部インポート不可）
 │   ├── config/
 │   │   └── config.go                # 環境変数・設定読み込み
-│   ├── domain/                      # ドメインモデル
-│   │   ├── user.go                  # User エンティティ
-│   │   └── friendship.go            # Friendship エンティティ
+│   ├── domain/                      # ドメインモデル (エンティティ + 振る舞い)
+│   │   ├── user.go
+│   │   └── friendship.go
 │   ├── repository/                  # データアクセス層
-│   │   ├── repository.go            # Repository インターフェース
-│   │   ├── postgres.go              # PostgreSQL 実装
-│   │   └── dynamodb.go              # DynamoDB 実装 (Phase 4)
+│   │   ├── repository.go            # Repository インターフェース定義
+│   │   ├── postgres_user.go         # PostgreSQL 実装
+│   │   └── postgres_user_test.go    # 統合テスト (docker 上の PG)
 │   ├── service/                     # ビジネスロジック層
 │   │   ├── user_service.go
-│   │   └── user_service_test.go
-│   ├── handler/                     # トランスポート層
-│   │   ├── rest/                    # REST ハンドラー
-│   │   │   ├── handler.go
-│   │   │   ├── user_handler.go
-│   │   │   └── user_handler_test.go
-│   │   └── grpc/                    # gRPC ハンドラー
-│   │       ├── server.go
-│   │       ├── user_server.go
-│   │       └── user_server_test.go
-│   └── gen/                         # 自動生成コード（proto）
-│       └── user/
-│           └── v1/
-│               ├── user.pb.go
-│               └── user_grpc.pb.go
-├── migrations/                      # DB マイグレーション
-│   ├── 001_create_users.up.sql
-│   ├── 001_create_users.down.sql
-│   ├── 002_create_friendships.up.sql
-│   └── 002_create_friendships.down.sql
-└── tests/                           # 統合テスト・E2Eテスト
-    ├── integration/
-    │   └── user_test.go
-    └── e2e/
-        └── user_e2e_test.go
+│   │   └── user_service_test.go     # 単体テスト (fake repo)
+│   └── handler/                     # トランスポート層
+│       ├── rest/                    # REST ハンドラー (Phase 1+)
+│       │   ├── handler.go
+│       │   ├── user_handler.go
+│       │   └── user_handler_test.go
+│       └── grpc/                    # gRPC ハンドラー (Phase 3+)
+│           ├── server.go
+│           └── user_server.go
+└── migrations/                      # DB マイグレーション (golang-migrate)
+    ├── 001_create_users.up.sql
+    ├── 001_create_users.down.sql
+    └── 002_add_password_hash.up.sql # Phase 2 で追加
 ```
 
 ## レイヤードアーキテクチャ
 
-各サービスは以下の層で構成される。
+各サービスは以下の 3 層で構成される。**上の層は下の層の interface に依存する** (依存関係逆転)。これにより、各層を独立してテストできる。
 
 ```
 ┌─────────────────────────────────┐
@@ -152,149 +122,64 @@ services/user-service/
 │   (ユースケース・ドメインルール)    │     トランスポートに非依存
 ├─────────────────────────────────┤
 │        Repository 層             │  ← データアクセス
-│   (PostgreSQL, DynamoDB, Redis)  │     インターフェースで抽象化
+│   (PostgreSQL, Redis)            │     interface で抽象化
 └─────────────────────────────────┘
 ```
 
-**依存の方向**: Handler → Service → Repository（上から下へ）
+**依存の方向**: Handler → Service → Repository (interface)
 
-## Terraform ディレクトリ構成
+### 各層の責務まとめ
 
-```
-terraform/
-├── modules/                         # 再利用可能なモジュール
-│   ├── networking/                  # VPC, Subnet, NAT Gateway
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── eks/                         # EKS クラスター
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── database/                    # RDS (PostgreSQL), DynamoDB
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── messaging/                   # SQS, SNS
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── storage/                     # S3, ECR
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── auth/                        # Cognito
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   ├── cache/                       # ElastiCache (Redis)
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   └── outputs.tf
-│   └── observability/               # CloudWatch, X-Ray
-│       ├── main.tf
-│       ├── variables.tf
-│       └── outputs.tf
-├── environments/
-│   ├── dev/
-│   │   ├── main.tf                  # モジュール呼び出し
-│   │   ├── variables.tf
-│   │   ├── terraform.tfvars         # dev 固有の値
-│   │   ├── backend.tf               # S3 + DynamoDB バックエンド
-│   │   └── outputs.tf
-│   ├── staging/
-│   │   ├── main.tf
-│   │   ├── variables.tf
-│   │   ├── terraform.tfvars
-│   │   ├── backend.tf
-│   │   └── outputs.tf
-│   └── prod/
-│       ├── main.tf
-│       ├── variables.tf
-│       ├── terraform.tfvars
-│       ├── backend.tf
-│       └── outputs.tf
-└── global/                          # 環境横断のリソース
-    ├── s3-backend/                  # Terraform バックエンド用 S3/DynamoDB
-    │   └── main.tf
-    └── ecr/                         # ECR リポジトリ
-        └── main.tf
+| 層 | 依存先 | テスト方法 |
+|----|--------|-----------|
+| Handler | Service (interface) | `httptest` / `bufconn` + fake service |
+| Service | Repository (interface) | fake repository (in-memory) |
+| Repository | *pgxpool.Pool / redis.Client | 本物の DB (docker-compose で起動) |
+
+### 依存性注入 (DI)
+
+`cmd/server/main.go` で全ての依存を組み立てる。
+
+```go
+func main() {
+    cfg := config.Load()
+
+    pool, err := pgxpool.New(ctx, cfg.DBURL)
+    // ...
+
+    // 下から上に組み立てる
+    userRepo  := repository.NewPostgresUserRepository(pool)
+    userSvc   := service.NewUserService(userRepo)
+    userHdlr  := resthandler.NewUserHandler(userSvc)
+
+    r := chi.NewRouter()
+    userHdlr.Register(r)
+
+    // ...
+}
 ```
 
-## Kubernetes ディレクトリ構成
-
-Kustomize を使った環境分離。
-
-```
-kubernetes/
-├── base/                            # 共通マニフェスト
-│   ├── kustomization.yaml
-│   ├── namespace.yaml
-│   ├── user-service/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── hpa.yaml
-│   ├── chat-service/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── hpa.yaml
-│   ├── realtime-service/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── hpa.yaml
-│   ├── notification-service/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── hpa.yaml
-│   ├── media-service/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   └── hpa.yaml
-│   ├── api-gateway/
-│   │   ├── deployment.yaml
-│   │   ├── service.yaml
-│   │   ├── ingress.yaml
-│   │   └── hpa.yaml
-│   └── network-policies/
-│       └── default-deny.yaml
-├── overlays/
-│   ├── dev/
-│   │   ├── kustomization.yaml      # dev 用パッチ
-│   │   ├── replicas-patch.yaml      # レプリカ数: 1
-│   │   └── resources-patch.yaml     # リソース制限（小）
-│   ├── staging/
-│   │   ├── kustomization.yaml
-│   │   ├── replicas-patch.yaml      # レプリカ数: 2
-│   │   └── resources-patch.yaml     # リソース制限（中）
-│   └── prod/
-│       ├── kustomization.yaml
-│       ├── replicas-patch.yaml      # レプリカ数: 3+
-│       ├── resources-patch.yaml     # リソース制限（大）
-│       └── pdb.yaml                 # PodDisruptionBudget
-└── monitoring/                      # 可観測性
-    ├── prometheus/
-    │   └── service-monitor.yaml
-    └── grafana/
-        └── dashboards/
-```
+---
 
 ## go.work 設定
 
 ```go
-go 1.23
+go 1.22
 
 use (
+    ./gen
     ./pkg
     ./services/user-service
-    ./services/chat-service
-    ./services/realtime-service
-    ./services/notification-service
-    ./services/media-service
-    ./services/api-gateway
+    ./services/chat-service       // Phase 3 で追加
+    ./services/realtime-service   // Phase 4 で追加
+    ./services/api-gateway        // Phase 3 で追加
 )
 ```
 
+---
+
 ## 関連ドキュメント
 
-- [Terraform 構成詳細](../terraform/structure.md)
-- [Kubernetes アーキテクチャ](../kubernetes/architecture.md)
+- [マイクロサービス詳細](./microservices.md)
+- [API 設計](./api-design.md)
+- [データモデル](./data-model.md)

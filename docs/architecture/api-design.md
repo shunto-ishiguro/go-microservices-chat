@@ -38,22 +38,14 @@
 | DELETE | `/api/v1/rooms/:id/messages/:msgId` | メッセージ削除 | 必要 |
 | POST | `/api/v1/rooms/:id/read` | 既読を送信 | 必要 |
 
-### Notification Service エンドポイント
+### Auth エンドポイント (Phase 2 で追加)
 
 | メソッド | パス | 説明 | 認証 |
 |---------|------|------|------|
-| GET | `/api/v1/notifications` | 通知一覧 | 必要 |
-| PUT | `/api/v1/notifications/:id/read` | 通知を既読 | 必要 |
-| PUT | `/api/v1/notifications/read-all` | 全通知を既読 | 必要 |
-| GET | `/api/v1/notifications/unread-count` | 未読数取得 | 必要 |
-
-### Media Service エンドポイント
-
-| メソッド | パス | 説明 | 認証 |
-|---------|------|------|------|
-| POST | `/api/v1/media/upload-url` | Presigned URL 取得 | 必要 |
-| POST | `/api/v1/media/upload-complete` | アップロード完了通知 | 必要 |
-| GET | `/api/v1/media/:id` | メディアメタデータ取得 | 必要 |
+| POST | `/api/v1/auth/register` | ユーザー登録 | 不要 |
+| POST | `/api/v1/auth/login` | ログイン (JWT ペア発行) | 不要 |
+| POST | `/api/v1/auth/refresh` | リフレッシュトークンでアクセストークン再発行 | 不要 |
+| POST | `/api/v1/auth/logout` | リフレッシュトークン失効 | 必要 |
 
 ### 共通レスポンスフォーマット
 
@@ -155,7 +147,7 @@ message CreateUserRequest {
   string email = 1;
   string username = 2;
   string display_name = 3;
-  string cognito_sub = 4;
+  string password = 4;  // Phase 2 で bcrypt 化して保管
 }
 
 message CreateUserResponse {
@@ -430,128 +422,6 @@ message UpdatePresenceRequest {
 }
 
 message UpdatePresenceResponse {}
-```
-
-### Notification Service (proto/notification/v1/notification.proto)
-
-```protobuf
-syntax = "proto3";
-package notification.v1;
-
-import "google/protobuf/timestamp.proto";
-
-service NotificationService {
-  rpc GetNotifications(GetNotificationsRequest) returns (GetNotificationsResponse);
-  rpc MarkAsRead(MarkNotificationReadRequest) returns (MarkNotificationReadResponse);
-  rpc MarkAllAsRead(MarkAllReadRequest) returns (MarkAllReadResponse);
-  rpc GetUnreadCount(GetUnreadCountRequest) returns (GetUnreadCountResponse);
-}
-
-enum NotificationType {
-  NOTIFICATION_TYPE_UNSPECIFIED = 0;
-  NOTIFICATION_TYPE_MESSAGE = 1;
-  NOTIFICATION_TYPE_FRIEND_REQUEST = 2;
-  NOTIFICATION_TYPE_ROOM_INVITE = 3;
-}
-
-message Notification {
-  string id = 1;
-  string user_id = 2;
-  NotificationType type = 3;
-  string title = 4;
-  string body = 5;
-  bool is_read = 6;
-  string reference_id = 7;
-  google.protobuf.Timestamp created_at = 8;
-}
-
-message GetNotificationsRequest {
-  string user_id = 1;
-  int32 limit = 2;
-  string cursor = 3;
-}
-
-message GetNotificationsResponse {
-  repeated Notification notifications = 1;
-  string next_cursor = 2;
-  bool has_more = 3;
-}
-
-message MarkNotificationReadRequest {
-  string notification_id = 1;
-}
-
-message MarkNotificationReadResponse {}
-
-message MarkAllReadRequest {
-  string user_id = 1;
-}
-
-message MarkAllReadResponse {}
-
-message GetUnreadCountRequest {
-  string user_id = 1;
-}
-
-message GetUnreadCountResponse {
-  int32 count = 1;
-}
-```
-
-### Media Service (proto/media/v1/media.proto)
-
-```protobuf
-syntax = "proto3";
-package media.v1;
-
-import "google/protobuf/timestamp.proto";
-
-service MediaService {
-  rpc GetUploadURL(GetUploadURLRequest) returns (GetUploadURLResponse);
-  rpc CompleteUpload(CompleteUploadRequest) returns (CompleteUploadResponse);
-  rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
-}
-
-message GetUploadURLRequest {
-  string user_id = 1;
-  string file_name = 2;
-  string content_type = 3;
-  int64 file_size = 4;
-}
-
-message GetUploadURLResponse {
-  string upload_url = 1;
-  string media_id = 2;
-  string object_key = 3;
-}
-
-message CompleteUploadRequest {
-  string media_id = 1;
-  string user_id = 2;
-}
-
-message CompleteUploadResponse {
-  MediaInfo media = 1;
-}
-
-message GetMediaRequest {
-  string media_id = 1;
-}
-
-message GetMediaResponse {
-  MediaInfo media = 1;
-}
-
-message MediaInfo {
-  string id = 1;
-  string user_id = 2;
-  string file_name = 3;
-  string content_type = 4;
-  int64 file_size = 5;
-  string url = 6;
-  string thumbnail_url = 7;
-  google.protobuf.Timestamp created_at = 8;
-}
 ```
 
 ---

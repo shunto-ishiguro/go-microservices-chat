@@ -2,45 +2,70 @@
 
 ## 概要
 
-本プロジェクトでは、学習の段階に応じてデータストアを進化させる。
+本プロジェクトは **PostgreSQL に統一** する (学習の焦点をマイクロサービス設計に絞るため、NoSQL は対象外)。Redis はキャッシュ・Pub/Sub・プレゼンスの用途に限定する。
 
-- **Phase 1-3**: PostgreSQL（SQL の基礎を学ぶ）
-- **Phase 4**: DynamoDB へ移行（NoSQL + AWS スキルを学ぶ）
-- **全 Phase 共通**: Redis（キャッシュ・Pub/Sub）
+各サービスは自分の DB のみを所有し、他サービスの DB には直接アクセスしない。
 
-## Phase 1-3: PostgreSQL スキーマ
+| サービス | DB | 主なテーブル |
+|---------|-----|------------|
+| user-service | userdb | `users`, `refresh_tokens`, `friendships` |
+| chat-service | chatdb | `rooms`, `room_members`, `messages`, `read_receipts` |
+| realtime-service | (Redis のみ) | プレゼンス、接続マッピング、Pub/Sub |
 
-### users DB（User Service 所有）
+---
+
+## user-service: userdb
+
+### `users` テーブル
 
 ```sql
--- ユーザー基本情報
 CREATE TABLE users (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    cognito_sub VARCHAR(255) UNIQUE,
-    email       VARCHAR(255) UNIQUE NOT NULL,
-    username    VARCHAR(50) UNIQUE NOT NULL,
-    display_name VARCHAR(100) NOT NULL,
-    avatar_url  VARCHAR(500),
-    status_text VARCHAR(200),
-    is_online   BOOLEAN DEFAULT false,
-    last_seen_at TIMESTAMPTZ,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email           VARCHAR(255) UNIQUE NOT NULL,
+    username        VARCHAR(50) UNIQUE NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,  -- bcrypt (Phase 2 で追加)
+    display_name    VARCHAR(100) NOT NULL,
+    avatar_url      VARCHAR(500),
+    status_text     VARCHAR(200),
+    is_online       BOOLEAN DEFAULT false,
+    last_seen_at    TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_username ON users(username);
-CREATE INDEX idx_users_cognito_sub ON users(cognito_sub);
+```
 
--- フレンドリレーション
+### `refresh_tokens` テーブル (Phase 2)
+
+```sql
+CREATE TABLE refresh_tokens (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash      VARCHAR(255) NOT NULL,  -- sha256 (検索用、復号不要)
+    expires_at      TIMESTAMPTZ NOT NULL,
+    revoked_at      TIMESTAMPTZ,
+    user_agent      VARCHAR(255),
+    ip_address      INET,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_refresh_tokens_user ON refresh_tokens(user_id);
+CREATE INDEX idx_refresh_tokens_hash ON refresh_tokens(token_hash);
+```
+
+### `friendships` テーブル
+
+```sql
 CREATE TABLE friendships (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID NOT NULL REFERENCES users(id),
-    friend_id   UUID NOT NULL REFERENCES users(id),
-    status      VARCHAR(20) NOT NULL DEFAULT 'pending',
-                -- pending, accepted, blocked
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID NOT NULL REFERENCES users(id),
+    friend_id       UUID NOT NULL REFERENCES users(id),
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    -- pending, accepted, blocked
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(user_id, friend_id)
 );
 
@@ -48,235 +73,127 @@ CREATE INDEX idx_friendships_user ON friendships(user_id, status);
 CREATE INDEX idx_friendships_friend ON friendships(friend_id, status);
 ```
 
-### messages DB（Chat Service 所有）
+---
+
+## chat-service: chatdb
+
+### `rooms` テーブル
 
 ```sql
--- チャットルーム
 CREATE TABLE rooms (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        VARCHAR(100),
-    type        VARCHAR(20) NOT NULL DEFAULT 'direct',
-                -- direct (1:1), group
-    created_by  UUID NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name            VARCHAR(100),
+    type            VARCHAR(20) NOT NULL DEFAULT 'direct',
+                    -- direct (1:1), group
+    created_by      UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+```
 
--- ルームメンバー
+### `room_members` テーブル
+
+```sql
 CREATE TABLE room_members (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    room_id     UUID NOT NULL REFERENCES rooms(id),
-    user_id     UUID NOT NULL,
-    role        VARCHAR(20) NOT NULL DEFAULT 'member',
-                -- owner, admin, member
-    joined_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_id         UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    user_id         UUID NOT NULL,
+    role            VARCHAR(20) NOT NULL DEFAULT 'member',
+                    -- owner, admin, member
+    joined_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(room_id, user_id)
 );
 
 CREATE INDEX idx_room_members_user ON room_members(user_id);
 CREATE INDEX idx_room_members_room ON room_members(room_id);
+```
 
--- メッセージ
+> **注意**: `user_id` は外部キー参照にしていない (user-service 所有のため、境界を跨がない)。参照整合性は API 経由で担保する。
+
+### `messages` テーブル
+
+```sql
 CREATE TABLE messages (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    room_id     UUID NOT NULL REFERENCES rooms(id),
-    sender_id   UUID NOT NULL,
-    content     TEXT NOT NULL,
-    message_type VARCHAR(20) NOT NULL DEFAULT 'text',
-                -- text, image, file
-    media_url   VARCHAR(500),
-    parent_id   UUID REFERENCES messages(id),  -- スレッド返信
-    is_edited   BOOLEAN DEFAULT false,
-    is_deleted  BOOLEAN DEFAULT false,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_id         UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    sender_id       UUID NOT NULL,  -- user-service 所有、外部キーなし
+    content         TEXT NOT NULL,
+    message_type    VARCHAR(20) NOT NULL DEFAULT 'text',
+                    -- text, image, file
+    parent_id       UUID REFERENCES messages(id),  -- スレッド返信
+    is_edited       BOOLEAN DEFAULT false,
+    is_deleted      BOOLEAN DEFAULT false,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_messages_room_created ON messages(room_id, created_at DESC);
 CREATE INDEX idx_messages_sender ON messages(sender_id);
+```
 
--- 既読管理
+### `read_receipts` テーブル
+
+```sql
 CREATE TABLE read_receipts (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    room_id     UUID NOT NULL REFERENCES rooms(id),
-    user_id     UUID NOT NULL,
-    last_read_message_id UUID REFERENCES messages(id),
-    last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    room_id                 UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+    user_id                 UUID NOT NULL,
+    last_read_message_id    UUID REFERENCES messages(id),
+    last_read_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE(room_id, user_id)
 );
 
 CREATE INDEX idx_read_receipts_room ON read_receipts(room_id);
 ```
 
-## Phase 4: DynamoDB テーブル設計
+---
 
-### アクセスパターン分析
+## realtime-service: Redis
 
-DynamoDB の設計はアクセスパターンから逆算する。
-
-| # | アクセスパターン | 頻度 |
-|---|----------------|------|
-| 1 | ルーム ID でメッセージ一覧を取得（新しい順） | 非常に高い |
-| 2 | ユーザー ID で参加ルーム一覧を取得 | 高い |
-| 3 | ルーム ID でメンバー一覧を取得 | 高い |
-| 4 | ユーザー ID で通知一覧を取得（新しい順） | 高い |
-| 5 | 特定メッセージを ID で取得 | 中 |
-| 6 | ユーザー ID + ルーム ID で既読状態を取得 | 高い |
-| 7 | ルーム ID で最新メッセージ N 件を取得 | 高い |
-
-### messages テーブル（Chat Service 所有）
+永続化は不要 (揮発データ)。本プロジェクトの realtime-service は **1 インスタンス構成** だが、将来 N インスタンスに拡張しても同じコードで動くよう、メッセージ配信は Redis Pub/Sub を経由させる。
 
 ```
-テーブル名: chat-messages
+# プレゼンス情報
+presence:<user_id>              → "online" | "offline"
+                                  TTL: 60 秒 (ハートビートで更新)
 
-Partition Key (PK): ROOM#<room_id>
-Sort Key (SK):      MSG#<timestamp>#<message_id>
+# Pub/Sub チャンネル (自分 → Redis → 自分に戻ってきて Hub に流す)
+channel:room:<room_id>          → ルーム内メッセージ配信用
+channel:user:<user_id>          → 個人向け通知用
 
-GSI1:
-  PK: USER#<user_id>
-  SK: ROOM#<room_id>#<timestamp>
+# レートリミット (Phase 2: ログイン試行)
+ratelimit:login:<ip>            → カウンター (TTL つき)
 
-属性:
-  - pk          (S): "ROOM#<room_id>"
-  - sk          (S): "MSG#<2024-01-15T10:30:00Z>#<msg_id>"
-  - gsi1pk      (S): "USER#<user_id>"
-  - gsi1sk      (S): "ROOM#<room_id>#<2024-01-15T10:30:00Z>"
-  - sender_id   (S): "<user_id>"
-  - content     (S): "メッセージ本文"
-  - message_type(S): "text" | "image" | "file"
-  - media_url   (S): "https://..."
-  - parent_id   (S): "<message_id>"  (スレッド返信)
-  - is_edited   (BOOL): false
-  - created_at  (S): ISO 8601
-  - updated_at  (S): ISO 8601
+# 将来 N インスタンス時の接続マッピング (1 インスタンスでは不要)
+# ws:connections:<user_id>      → Set of <instance_id>:<connection_id>
 ```
 
-**クエリ例**:
-```
-# パターン1: ルームのメッセージ一覧（新しい順）
-PK = "ROOM#abc123", SK begins_with "MSG#", ScanIndexForward=false
+---
 
-# パターン7: ルームの最新N件
-PK = "ROOM#abc123", SK begins_with "MSG#", ScanIndexForward=false, Limit=N
-```
+## Repository パターン
 
-### rooms テーブル（Chat Service 所有）
-
-```
-テーブル名: chat-rooms
-
-Partition Key (PK): ROOM#<room_id>
-Sort Key (SK):      METADATA | MEMBER#<user_id> | READ#<user_id>
-
-GSI1 (ユーザーの参加ルーム検索):
-  PK: USER#<user_id>
-  SK: ROOM#<room_id>
-
-アイテムタイプ 1 - ルームメタデータ:
-  - pk   (S): "ROOM#<room_id>"
-  - sk   (S): "METADATA"
-  - name (S): "ルーム名"
-  - type (S): "direct" | "group"
-  - created_by (S): "<user_id>"
-  - created_at (S): ISO 8601
-
-アイテムタイプ 2 - ルームメンバー:
-  - pk      (S): "ROOM#<room_id>"
-  - sk      (S): "MEMBER#<user_id>"
-  - gsi1pk  (S): "USER#<user_id>"
-  - gsi1sk  (S): "ROOM#<room_id>"
-  - role    (S): "owner" | "admin" | "member"
-  - joined_at(S): ISO 8601
-
-アイテムタイプ 3 - 既読状態:
-  - pk               (S): "ROOM#<room_id>"
-  - sk               (S): "READ#<user_id>"
-  - last_read_msg_id (S): "<message_id>"
-  - last_read_at     (S): ISO 8601
-```
-
-**クエリ例**:
-```
-# パターン2: ユーザーの参加ルーム一覧
-GSI1: PK = "USER#user123", SK begins_with "ROOM#"
-
-# パターン3: ルームのメンバー一覧
-PK = "ROOM#abc123", SK begins_with "MEMBER#"
-
-# パターン6: 既読状態の取得
-PK = "ROOM#abc123", SK = "READ#user123"
-```
-
-### notifications テーブル（Notification Service 所有）
-
-```
-テーブル名: notifications
-
-Partition Key (PK): USER#<user_id>
-Sort Key (SK):      NOTIF#<timestamp>#<notification_id>
-
-属性:
-  - pk          (S): "USER#<user_id>"
-  - sk          (S): "NOTIF#<2024-01-15T10:30:00Z>#<notif_id>"
-  - type        (S): "message" | "friend_request" | "room_invite"
-  - title       (S): "通知タイトル"
-  - body        (S): "通知本文"
-  - is_read     (BOOL): false
-  - reference_id(S): "<room_id or user_id>"
-  - created_at  (S): ISO 8601
-  - ttl         (N): Unix timestamp (90日後に自動削除)
-```
-
-**クエリ例**:
-```
-# パターン4: ユーザーの通知一覧（新しい順）
-PK = "USER#user123", SK begins_with "NOTIF#", ScanIndexForward=false
-```
-
-## PostgreSQL → DynamoDB 移行戦略 (Phase 4)
-
-### 移行手順
-
-1. **DynamoDB テーブル作成**: Terraform でテーブル・GSI を作成
-2. **デュアルライト実装**: 新規データを PostgreSQL と DynamoDB の両方に書き込み
-3. **データ移行スクリプト**: 既存データを DynamoDB へバッチ移行
-4. **読み取り切り替え**: 読み取り先を DynamoDB に変更
-5. **PostgreSQL 書き込み停止**: PostgreSQL への書き込みを停止
-6. **PostgreSQL 廃止**: バックアップ後にデータベースを廃止
-
-### Repository パターンによる抽象化
+データアクセスはすべて interface 経由にして、テストでの差し替えを容易にする。Phase 1 ですでに user-service で実装済みのパターンを全サービスに適用する。
 
 ```go
-// データストアに依存しないインターフェース
-type MessageRepository interface {
-    Create(ctx context.Context, msg *Message) error
-    GetByRoomID(ctx context.Context, roomID string, limit int, cursor string) ([]*Message, string, error)
-    GetByID(ctx context.Context, id string) (*Message, error)
+// domain / interface は service 層が依存する
+type UserRepository interface {
+    Create(ctx context.Context, u *domain.User) error
+    GetByID(ctx context.Context, id string) (*domain.User, error)
+    GetByEmail(ctx context.Context, email string) (*domain.User, error)
+    Update(ctx context.Context, u *domain.User) error
 }
 
-// Phase 1-3: PostgreSQL 実装
-type PostgresMessageRepository struct { ... }
-
-// Phase 4: DynamoDB 実装
-type DynamoDBMessageRepository struct { ... }
+// Postgres 実装は infrastructure 層で提供
+type postgresUserRepository struct {
+    pool *pgxpool.Pool
+}
 ```
 
-## Redis データモデル
+単体テストでは in-memory fake、結合テストでは本物の PostgreSQL (docker-compose で起動したもの) を使う。
 
-```
-# プレゼンス情報（Realtime Service）
-presence:<user_id>  → {"status": "online", "last_seen": "..."}
-                      TTL: 300秒（ハートビート更新）
-
-# WebSocket 接続マッピング
-ws:connections:<user_id> → Set of <server_id>:<connection_id>
-
-# Pub/Sub チャンネル
-channel:room:<room_id>  → メッセージ配信
-channel:user:<user_id>  → 個人通知
-```
+---
 
 ## 関連ドキュメント
 
-- [DynamoDB 設計詳細](../aws/dynamodb-design.md)
+- [マイクロサービス詳細](./microservices.md)
 - [API 設計](./api-design.md)
