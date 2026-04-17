@@ -23,7 +23,7 @@ CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email           VARCHAR(255) UNIQUE NOT NULL,
     username        VARCHAR(50) UNIQUE NOT NULL,
-    password_hash   VARCHAR(255) NOT NULL,  -- bcrypt (Phase 2 で追加)
+    password_hash   VARCHAR(255) NOT NULL,  -- bcrypt (Phase 1 で追加)
     display_name    VARCHAR(100) NOT NULL,
     avatar_url      VARCHAR(500),
     status_text     VARCHAR(200),
@@ -37,7 +37,7 @@ CREATE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_username ON users(username);
 ```
 
-### `refresh_tokens` テーブル (Phase 2)
+### `refresh_tokens` テーブル (Phase 1)
 
 ```sql
 CREATE TABLE refresh_tokens (
@@ -161,7 +161,7 @@ presence:<user_id>              → "online" | "offline"
 channel:room:<room_id>          → ルーム内メッセージ配信用
 channel:user:<user_id>          → 個人向け通知用
 
-# レートリミット (Phase 2: ログイン試行)
+# レートリミット (Phase 4: Envoy BackendTrafficPolicy 経由)
 ratelimit:login:<ip>            → カウンター (TTL つき)
 
 # 将来 N インスタンス時の接続マッピング (1 インスタンスでは不要)
@@ -189,7 +189,7 @@ type postgresUserRepository struct {
 }
 ```
 
-単体テストでは in-memory fake、結合テストでは本物の PostgreSQL (docker-compose で起動したもの) を使う。
+単体テストでは in-memory fake、結合テストでは kind クラスタ上で起動した PostgreSQL (port-forward 経由) を使う。
 
 ---
 

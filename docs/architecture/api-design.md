@@ -1,6 +1,17 @@
 # API 設計
 
-## REST API（API Gateway 経由）
+## 全体方針
+
+このプロジェクトでは **gRPC を API の一次ソース** とする。REST は **Envoy Gateway の gRPC-JSON Transcoder Filter** が proto 定義 (`google.api.http` アノテーション付き) から自動変換する。
+
+- **Phase 1〜3 (Go 集中期間)**: 開発時は `grpcurl -H "x-user-id: <uuid>"` で直接動作確認 (REST は未公開)
+- **Phase 4 (K8s + Envoy 期間)**: Envoy Gateway が外部向け REST を自動公開 (Go で api-gateway は書かない)
+
+したがって **REST エンドポイント一覧は Phase 4 で Envoy が公開するクライアント向け API の仕様** を示すものであり、user-service / chat-service 自体は REST サーバーを持たない。
+
+---
+
+## REST API（Phase 4 以降、Envoy Gateway が gRPC-JSON Transcoder で自動公開）
 
 ### 認証
 
@@ -38,7 +49,7 @@
 | DELETE | `/api/v1/rooms/:id/messages/:msgId` | メッセージ削除 | 必要 |
 | POST | `/api/v1/rooms/:id/read` | 既読を送信 | 必要 |
 
-### Auth エンドポイント (Phase 2 で追加)
+### Auth エンドポイント (Phase 1で追加)
 
 | メソッド | パス | 説明 | 認証 |
 |---------|------|------|------|
@@ -105,7 +116,11 @@
 
 ---
 
-## gRPC サービス定義
+## gRPC サービス定義（API の一次ソース）
+
+**Phase 1 から user-service はこの gRPC 定義で実装** する。Phase 1〜3 の間は `grpcurl` で直接叩いて動作確認し、Phase 4 で Envoy Gateway が REST に変換して公開する。
+
+
 
 ### User Service (proto/user/v1/user.proto)
 
@@ -147,7 +162,7 @@ message CreateUserRequest {
   string email = 1;
   string username = 2;
   string display_name = 3;
-  string password = 4;  // Phase 2 で bcrypt 化して保管
+  string password = 4;  // Phase 1で bcrypt 化して保管
 }
 
 message CreateUserResponse {
