@@ -271,10 +271,6 @@ presence:<user_id>  → {"status": "online", "last_seen": "..."}
 # WebSocket 接続マッピング
 ws:connections:<user_id> → Set of <server_id>:<connection_id>
 
-# タイピングインジケーター
-typing:<room_id> → Set of <user_id>
-                   TTL: 5秒
-
 # Pub/Sub チャンネル
 channel:room:<room_id>  → メッセージ配信
 channel:user:<user_id>  → 個人通知
@@ -282,6 +278,5 @@ channel:user:<user_id>  → 個人通知
 
 ## 関連ドキュメント
 
-- [アーキテクチャ概要](./overview.md)
 - [DynamoDB 設計詳細](../aws/dynamodb-design.md)
 - [API 設計](./api-design.md)

@@ -56,13 +56,12 @@
 |------|------|
 | ポート | WebSocket: 8081, gRPC: 50055 |
 | データストア | Redis (Pub/Sub + プレゼンス) |
-| プロトコル | WebSocket (クライアント向け) + gRPC Streaming (内部向け) |
+| プロトコル | WebSocket (クライアント向け) + gRPC Server Streaming (内部向け) |
 
 **機能**:
 - WebSocket 接続の確立・維持・切断管理
 - リアルタイムメッセージのブロードキャスト
 - ユーザーのプレゼンス（オンライン/オフライン）管理
-- タイピングインジケーター
 
 **所有データ**:
 - アクティブ接続情報（Redis）
@@ -217,6 +216,5 @@ chat-service.chat-app.svc.cluster.local:50052
 
 ## 関連ドキュメント
 
-- [アーキテクチャ概要](./overview.md)
 - [データモデル設計](./data-model.md)
 - [API 設計](./api-design.md)
