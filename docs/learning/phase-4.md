@@ -1,8 +1,5 @@
 # Phase 4: AWS 統合 (DynamoDB, S3, SQS/SNS, Cognito)
 
-> **期間目安**: 約6-8週間
-> **難易度**: ★★★★☆（中級〜上級）
-
 ---
 
 ## 学習目標
@@ -704,15 +701,16 @@ Phase 4 完了時に以下が動作していること:
 
 ```mermaid
 graph TD
-    Client[クライアント] <-->|WebSocket| RS["realtime-service (:8083)"]
-    Client -->|REST| GW["API Gateway (:8080)"]
-
-    RS <-->|Redis Pub/Sub| Redis[Redis]
+    Client[クライアント] -->|REST| GW["API Gateway (:8080)"]
+    Client -->|WSS| GW
 
     GW --> US[user-svc]
     GW --> CS[chat-svc]
     GW --> MS[media-svc]
     GW --> NS[notification-svc]
+    GW -->|WebSocket Proxy| RS["realtime-service (:8083)"]
+
+    RS <-->|Redis Pub/Sub| Redis[Redis]
 
     US --> DDB[DynamoDB]
     CS --> DDB
@@ -772,42 +770,6 @@ graph TD
 | NoSQL Workbench | DynamoDB のデータモデリングとクエリ可視化 |
 | LocalStack | AWS サービスのローカルエミュレーション |
 | awslocal | LocalStack 用の AWS CLI ラッパー |
-
----
-
-## 認定試験との関連
-
-Phase 4 は AWS マネージドサービスを実際に構築するため、**AWS SAA-C03 試験** との関連が非常に強い。また、CKA/CKAD の前提知識としてクラウドサービスの理解が深まる。
-
-### AWS SAA-C03 との対応
-
-| 試験ドメイン | 配点 | Phase 4 の対応トピック |
-|-------------|------|----------------------|
-| **ドメイン 1: セキュアなアーキテクチャの設計** | 30% | Cognito（認証/認可）、S3 バケットポリシー、IAM ロール、暗号化 |
-| **ドメイン 2: 弾力性の高いアーキテクチャの設計** | 26% | DynamoDB（マルチ AZ 自動レプリケーション）、SQS/SNS（疎結合アーキテクチャ）、DLQ（障害耐性） |
-| **ドメイン 3: 高性能アーキテクチャの設計** | 24% | DynamoDB（パーティション設計、GSI）、S3（Transfer Acceleration, Presigned URL）、SQS（スループット最適化） |
-| **ドメイン 4: コスト最適化アーキテクチャの設計** | 20% | DynamoDB（オンデマンド vs プロビジョンドキャパシティ）、S3（ストレージクラス、ライフサイクル）、SQS（Long Polling） |
-
-### 具体的な試験トピックとの対応表
-
-| Phase 4 トピック | SAA-C03 試験での出題ポイント |
-|-----------------|---------------------------|
-| DynamoDB シングルテーブル設計 | パーティションキー設計、GSI の使い分け、キャパシティモードの選択 |
-| S3 Presigned URL | セキュアなファイルアクセス、バケットポリシーとの違い |
-| SQS/SNS ファンアウト | 疎結合アーキテクチャの設計、同期 vs 非同期の使い分け |
-| DLQ | メッセージ処理の信頼性設計、障害復旧パターン |
-| Cognito | サーバーレス認証、フェデレーション、MFA |
-| SQS FIFO | 順序保証が必要なユースケースの識別 |
-
-### CKA/CKAD との関連
-
-| 関連ポイント | 説明 |
-|-------------|------|
-| AWS サービスの理解 | EKS 上でのアプリケーションが接続する先の AWS サービスを理解する |
-| IAM / IRSA の概念 | Phase 5 で EKS + IRSA を構成する際の前提知識 |
-| 環境変数管理 | Kubernetes の ConfigMap/Secret で AWS 設定を管理する前提知識 |
-
-> **注**: Phase 4 完了時点で AWS SAA-C03 の主要サービス（DynamoDB, S3, SQS, SNS, Cognito）を実際に使った経験が得られる。試験勉強と並行して取り組むと効果的。
 
 ---
 

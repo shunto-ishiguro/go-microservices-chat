@@ -1,8 +1,5 @@
 # Phase 1: Go 基礎 - REST API (user-service + PostgreSQL)
 
-> **期間目安**: 約1週間
-> **難易度**: ★★☆☆☆（入門〜初級）
-
 ---
 
 ## 学習目標
@@ -266,19 +263,6 @@ services/user-service/
 | Postman / curl | API テスト |
 | pgAdmin / DBeaver | DB 管理 |
 | Docker | PostgreSQL のローカル実行 |
-
----
-
-## 認定試験との関連
-
-Phase 1 は Go 言語の基礎習得に集中するため、AWS SAA-C03 や CKA/CKAD との直接的な関連は限定的である。ただし、以下の基盤的スキルが後のフェーズで活きてくる:
-
-| 試験 | 関連ポイント |
-|------|-------------|
-| AWS SAA-C03 | RDS (PostgreSQL) の概念理解は、後の AWS デプロイ時に役立つ |
-| CKA/CKAD | アプリケーションのコンテナ化の前提となるアプリ開発スキルの構築 |
-
-> **注**: 本格的な試験対策は Phase 4 以降（Docker/Kubernetes フェーズ）から開始する。Phase 1 では「動くアプリケーションを作れる」ことに集中する。
 
 ---
 
