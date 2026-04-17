@@ -1,7 +1,8 @@
 go 1.22.2
 
 use (
-	./gen/go
-	./pkg
-	./services/user-service
+	// Phase 0 で ./gen/go と ./pkg を追加
+	// Phase 1 で ./services/user-service を追加
+	// Phase 2 で ./services/chat-service を追加
+	// Phase 3 で ./services/realtime-service を追加
 )

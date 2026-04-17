@@ -1,646 +1,507 @@
-# Phase 4: リアルタイム通信 (WebSocket + gRPC Server Streaming)
+# Phase 4: K8s + Envoy Gateway + 全サービスデプロイ
 
 ---
 
 ## 学習目標
 
-本フェーズでは、WebSocket と gRPC Server Streaming を活用し、リアルタイムチャット機能を実現する。realtime-service は **1 インスタンス構成** で動かすが、メッセージ配信は Redis Pub/Sub を経由させ、**N インスタンスに拡張しても同じコードで動く設計** を身につける。
+Phase 1〜3 で Go で完成させた 3 サービスを、**K8s (kind) + Envoy Gateway に載せ替える**。インフラに集中する Phase。
+
+**サービス側の Go コードは一切変更しない**。Envoy Gateway が JWT 検証・REST 公開・ルーティングを担当し、Phase 1〜3 で設計した `TrustedUserID` Interceptor に対して `x-user-id` を供給する役割を担う。
 
 | # | 目標 | 詳細 |
 |---|------|------|
-| 1 | WebSocket を理解し実装できる | プロトコル理解、接続管理、メッセージ配信 |
-| 2 | gRPC Server Streaming を実装できる | サービス間のリアルタイム配信 |
-| 3 | Redis Pub/Sub を活用できる | 責務分離 (受信 vs 配信) とスケール拡張の土台 |
-| 4 | リアルタイムアーキテクチャを設計できる | プレゼンス管理、ブロードキャスト、Hub パターン |
-| 5 | N インスタンスに拡張可能な設計を理解できる | 1 インスタンスで動きつつ、拡張時に変更不要な構造 |
+| 1 | kind でローカル K8s クラスタを運用できる | cluster-up / down / ログ確認 |
+| 2 | Gateway API を理解して書ける | Gateway / GRPCRoute / HTTPRoute / SecurityPolicy / BackendTrafficPolicy |
+| 3 | Envoy Gateway で JWT 検証を集約できる | SecurityPolicy + JWKS |
+| 4 | gRPC-JSON Transcoder で REST を自動公開できる | proto から REST API がブラウザ向けに |
+| 5 | 複数サービスを一気に K8s にデプロイできる | 3 サービス + PostgreSQL + Redis |
+| 6 | 信頼境界を NetworkPolicy で物理担保できる | Envoy 以外からの直接アクセス拒否 |
 
 ---
 
 ## 前提知識
 
-- **Phase 3 完了**: user-service と chat-service が gRPC で連携し、API Gateway 経由で JWT 認証付きアクセスができること
-- goroutine と channel の基礎理解
-- gRPC の Unary RPC の実装経験
-- TCP/IP の基本概念
+- **Phase 1〜3 完了**: user / chat / realtime の 3 サービスが `go run` で動き、localhost で連携できている
+- **K8s の基礎** (既知扱い): Pod / Deployment / Service / ConfigMap / Secret / Namespace
+- Docker と `kubectl` の基本操作
 
 ---
 
-## ステップ
+## 設計原則
 
-### ステップ 1: WebSocket の基礎
+### サービスのコードは変わらない
 
-WebSocket プロトコルの仕組みを理解する。
+Phase 1 で `TrustedUserID` Interceptor が **`x-user-id` メタデータを読むだけ** の設計になっている。Phase 4 で Envoy がその metadata を供給する側になる。
 
-- [ ] WebSocket とは何か（双方向・全二重通信）
-- [ ] HTTP との違いと使い分け
-- [ ] WebSocket ハンドシェイクの仕組み（HTTP Upgrade）
-- [ ] フレーム構造（テキスト、バイナリ、ping/pong、close）
-- [ ] WebSocket のライフサイクル（接続 → 通信 → 切断）
-- [ ] セキュリティ考慮事項（Origin チェック、WSS）
-
-```mermaid
-sequenceDiagram
-    participant C as クライアント
-    participant S as サーバー
-    C->>S: HTTP GET (Upgrade: websocket)
-    S->>C: HTTP 101 Switching Protocols
-    Note over C,S: 双方向通信開始
-    C->>S: テキスト/バイナリフレーム
-    S->>C: テキスト/バイナリフレーム
-    C->>S: Close Frame
-    S->>C: Close Frame
+```
+Phase 1-3 (開発中):            Phase 4 (K8s 運用):
+  テスト / grpcurl が             Envoy Gateway が JWT 検証して
+  x-user-id を手動注入             x-user-id を自動付与
+         │                                │
+         └──────────┬─────────────────────┘
+                    ▼
+          (どちらも)
+          user-service: x-user-id を読んで Context に
+          ※サービス側コードは同一
 ```
 
-**確認ポイント**: WebSocket のハンドシェイクと通信フローを説明できること。
+### auth-first デプロイ
+
+初回デプロイの瞬間から **SecurityPolicy と NetworkPolicy が貼られた** 状態にする。「先に保護なしでデプロイして後から追加」はしない。
 
 ---
 
-### ステップ 2: gorilla/websocket でサーバー実装
+## ステップ構成
 
-Go で WebSocket サーバーを構築する。
-
-- [ ] `gorilla/websocket` パッケージの導入
-- [ ] `Upgrader` の設定（バッファサイズ、Origin チェック）
-- [ ] WebSocket 接続のハンドリング
-- [ ] メッセージの読み書き（`ReadMessage`, `WriteMessage`）
-- [ ] Ping/Pong によるヘルスチェック
-- [ ] 接続のタイムアウト設定
-- [ ] 簡易エコーサーバーの実装
-
-```go
-// WebSocket ハンドラーの基本構造
-var upgrader = websocket.Upgrader{
-    // ReadBufferSize: 受信用バッファ（クライアント→サーバー方向）
-    // WriteBufferSize: 送信用バッファ（サーバー→クライアント方向）
-    // 接続ごとに確保されるため、同時接続数 × バッファサイズ がメモリ消費に直結する。
-    // チャットのような短いメッセージが中心なら 1024 で十分。
-    // 送受信で特性が異なる場合（例: 受信は小さく送信は大きい）は別々の値を設定できる。
-    ReadBufferSize:  1024,
-    WriteBufferSize: 1024,
-    CheckOrigin: func(r *http.Request) bool {
-        // 本番では適切な Origin チェックを実装
-        return true
-    },
-}
-
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-    // Upgrade() で HTTP → WebSocket に切り替え、WebSocket 接続オブジェクト (conn) を取得する。
-    // conn (*websocket.Conn) は WebSocket 接続そのもので、以降の全送受信はこれを通じて行う。
-    conn, err := upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        slog.Error("WebSocket upgrade failed", "error", err)
-        return
-    }
-    // 関数終了時に必ず接続を閉じる（忘れるとコネクションリーク）
-    defer conn.Close()
-
-    for {
-        // ReadMessage() はメッセージが届くまでブロックする。
-        // エラー（切断含む）が返ったらループを抜けて接続を閉じる。
-        msgType, msg, err := conn.ReadMessage()
-        if err != nil {
-            break
-        }
-        // WriteMessage() でクライアントにメッセージを送信する。
-        // 注意: 同時に1つの goroutine からしか呼べない。
-        // 複数 goroutine から送信したい場合はチャネルで1つの書き込み goroutine に集約する。
-        conn.WriteMessage(msgType, msg)
-    }
-}
-```
-
-**確認ポイント**: ブラウザまたは wscat から WebSocket 接続してメッセージをやり取りできること。
+| 部 | テーマ | ステップ |
+|----|--------|----------|
+| A | K8s クラスタと Gateway 基盤 | 1〜3 |
+| B | ミドルウェアのデプロイ (PostgreSQL / Redis) | 4 |
+| C | アプリケーションのデプロイ (3 サービス) | 5〜7 |
+| D | Envoy で JWT 検証 + REST 公開 | 8〜10 |
+| E | 信頼境界とレートリミット | 11〜12 |
+| F | end-to-end 検証 | 13 |
 
 ---
 
-### ステップ 3: realtime-service の実装
+## A. K8s クラスタと Gateway 基盤
 
-リアルタイム通信専用の新サービスを構築する。
+### ステップ 1: kind クラスタの構築
 
-- [ ] realtime-service のプロジェクト作成
-- [ ] 接続管理（Connection Manager / Hub パターン）
-- [ ] ルームベースのメッセージブロードキャスト
-- [ ] メッセージ型の定義:
+- [ ] kind のインストール
+- [ ] `deploy/kind-config.yaml` でクラスタ設定
 
-| メッセージ型 | 方向 | 説明 |
-|-------------|------|------|
-| `chat_message` | クライアント → サーバー | チャットメッセージ送信 |
-| `chat_message` | サーバー → クライアント | チャットメッセージ配信 |
-| `join_room` | クライアント → サーバー | ルーム参加 |
-| `leave_room` | クライアント → サーバー | ルーム退出 |
-| `presence_update` | サーバー → クライアント | プレゼンス状態変更通知 |
-| `error` | サーバー → クライアント | エラー通知 |
-
-- [ ] goroutine を活用した並行処理（読み取り/書き込みの分離）
-- [ ] チャネルベースのメッセージルーティング
-
-### Hub パターンの構造
-
-```mermaid
-graph TD
-    Hub["Hub<br/>rooms map / register ch<br/>unregister / broadcast"]
-    Hub --> RA["Room A<br/>clients"]
-    Hub --> RB["Room B<br/>clients"]
-    Hub --> RC["Room C<br/>clients"]
-    RA --> C1[C1]
-    RA --> C2[C2]
-    RA --> C3[C3]
-    RB --> C4[C4]
-    RB --> C5[C5]
-    RB --> C6[C6]
-    RC --> C7[C7]
-    RC --> C8[C8]
-    RC --> C9[C9]
-
-    style C1 fill:#e1f5fe
-    style C2 fill:#e1f5fe
-    style C3 fill:#e1f5fe
-    style C4 fill:#e1f5fe
-    style C5 fill:#e1f5fe
-    style C6 fill:#e1f5fe
-    style C7 fill:#e1f5fe
-    style C8 fill:#e1f5fe
-    style C9 fill:#e1f5fe
+```yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 8080
+      - containerPort: 30050
+        hostPort: 50051
 ```
 
-> C1〜C9 は WebSocket 接続
-
-#### Hub パターンとは
-
-WebSocket の **接続管理とメッセージ配信を一元的に行う中央管理パターン**。
-gorilla/websocket の公式チャットサンプルでも採用されている定番の設計。
-
-接続数やルーム数が増えると「誰がどのルームにいるか」「切断時にどこから消すか」「メッセージをどの接続に配信するか」の管理が煩雑になる。Hub がこれらを一手に引き受ける。
-
-#### コンポーネントの役割
-
-| コンポーネント | 役割 |
-|---|---|
-| **Hub** | 全体の管理者。チャネル経由でイベントを受け取り、ルームとクライアントを管理する |
-| **Room** | ルームごとのクライアント集合。ブロードキャスト対象を決める |
-| **Client** | 1つの WebSocket 接続に対応。読み取り/書き込み goroutine を持つ |
-
-#### 処理フロー
-
-```
-1. クライアント接続
-   conn を Upgrade → Client を作成 → Hub の register チャネルに送る → Hub がルームに追加
-
-2. メッセージ送信
-   Client の読み取り goroutine が ReadMessage() → Hub の broadcast チャネルに送る
-   → Hub が同じルームの全 Client に配信
-
-3. クライアント切断
-   ReadMessage() がエラーを返す → Hub の unregister チャネルに送る
-   → Hub がルームから削除、conn を Close
+```bash
+kind create cluster --name chat --config deploy/kind-config.yaml
 ```
 
-#### なぜチャネルを使うのか
-
-Hub は **1つの goroutine** で動き、チャネル経由でリクエストを受ける。
-`select` で1つずつ順番に処理するため、map への同時アクセスが起きず **mutex が不要** になる（Go らしい設計）。
-
-```go
-// Hub のメインループ（1 goroutine で実行）
-func (h *Hub) Run() {
-    for {
-        select {
-        case client := <-h.register:
-            // ルームにクライアントを追加（ロック不要）
-            h.rooms[client.roomID][client] = true
-
-        case client := <-h.unregister:
-            // ルームからクライアントを削除
-            delete(h.rooms[client.roomID], client)
-            close(client.send)
-
-        case msg := <-h.broadcast:
-            // ルーム内の全クライアントに配信
-            for client := range h.rooms[msg.roomID] {
-                client.send <- msg.data
-            }
-        }
-    }
-}
-```
-
-#### Client の goroutine 構造
-
-各 Client は **2つの goroutine** を持つ。これにより `conn.WriteMessage()` が常に1つの goroutine から呼ばれる制約を自然に満たせる。
-
-```go
-type Client struct {
-    hub    *Hub
-    conn   *websocket.Conn
-    roomID string
-    send   chan []byte  // Hub → Client へのメッセージ配信用
-}
-
-// 読み取り goroutine: conn.ReadMessage() → Hub に転送
-// 書き込み goroutine: send チャネルから受信 → conn.WriteMessage()
-```
-
-**確認ポイント**: 複数クライアントがルームに参加し、メッセージがブロードキャストされること。
+**確認ポイント**: `kubectl get nodes` で `Ready`。
 
 ---
 
-### ステップ 4: gRPC Server Streaming の実装
+### ステップ 2: Gateway API + Envoy Gateway のインストール
 
-gRPC の Streaming RPC を活用して、サービス間のリアルタイム通信を実現する。
+```bash
+# Gateway API CRD
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.0.0/standard-install.yaml
 
-#### なぜ Redis Pub/Sub 統一ではなく gRPC Server Streaming を使うのか
+# Envoy Gateway (Helm)
+helm install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
+  --version v1.2.0 -n envoy-gateway-system --create-namespace
 
-chat-service から realtime-service へリアルタイム配信する方法は2つある。
-
-```
-案A: chat-service が直接 Redis に Publish（シンプルだが結合が増える）
-  chat-service ──Redis Publish──→ 全 realtime-service
-  ❌ chat-service が Redis に依存 → サービス間の結合が増える
-  ❌ Redis は realtime-service の内部実装。他サービスが直接触るのは越境。
-
-案B: gRPC Server Streaming で realtime-service に流す（採用）
-  chat-service ──gRPC Server Streaming──→ realtime-service ──Redis Pub/Sub──→ Hub → WebSocket
-  ✅ chat-service は Redis の存在を知らない（疎結合）
-  ✅ 各サービスのデータストアは他サービスから直接触らない（マイクロサービスの原則）
-  ✅ realtime-service 内でも Pub/Sub を経由させることで N インスタンス拡張が無改修で可能
+# アプリ namespace
+kubectl create namespace chat-app
 ```
 
-| | Redis Pub/Sub 統一 | gRPC Server Streaming（採用） |
-|---|---|---|
-| **シンプルさ** | シンプル | やや複雑 |
-| **サービス間の結合** | chat-service が Redis に依存 | 疎結合を維持 |
-| **マイクロサービス原則** | 違反（データストアの共有） | 準拠 |
-| **インフラ変更時の影響** | Redis を変えたら両サービスに影響 | realtime-service だけで済む |
-
-> **学習プロジェクトとしての判断**: シンプルさだけで言えば Redis Pub/Sub 統一の方が楽だが、
-> ベストプラクティスを学ぶことが本リポジトリの目的なので gRPC Server Streaming を採用する。
-
-#### 各技術の担当区間
-
-```
-ブラウザ ←──WebSocket──→ realtime-service ←──gRPC Server Streaming──→ chat-service
-                              ↕
-                        Redis Pub/Sub
-              (配信責務の分離 / N インスタンス拡張の土台)
-```
-
-| 技術 | 区間 | 用途 |
-|---|---|---|
-| **WebSocket** | クライアント ⇄ realtime-service | ブラウザとの双方向通信（ブラウザは gRPC を直接扱えないため） |
-| **gRPC Server Streaming** | chat-service → realtime-service | サービス間のリアルタイム配信（疎結合を維持） |
-| **gRPC Unary** | realtime-service → chat-service | メッセージの保存（Phase 3 と同じ方式） |
-| **Redis Pub/Sub** | realtime-service 内部 (将来は他インスタンスとも) | 受信と配信の責務分離。1 インスタンスで完結しつつ N 対応 |
-
-#### Server Streaming が使われる場面
-
-realtime-service は起動時に chat-service の `SubscribeMessages` に接続し、ストリームを開いたまま待機する。
-chat-service 側で新しいイベントが発生すると、このストリームを通じて realtime-service にプッシュされる。
-
-| ユースケース | 起点 | 流れ |
-|---|---|---|
-| **REST API 経由のメッセージ投稿** | 管理画面やモバイルアプリが REST で chat-service に投稿 | chat-service → Server Streaming → realtime-service → Hub → クライアント |
-| **システムメッセージ** | 「ユーザーAがルームに参加しました」等を chat-service が自動生成 | chat-service → Server Streaming → realtime-service → Hub → クライアント |
-| **メッセージの編集・削除通知** | REST API 経由でメッセージを編集/削除 | chat-service → Server Streaming → realtime-service → Hub → クライアント |
-
-共通点: **realtime-service が WebSocket で直接受け取っていないイベント** を、chat-service から教えてもらう必要がある。
-
-```
-realtime-service の起動時:
-
-  realtime-service ──SubscribeMessages()──→ chat-service
-                                             │
-  以降、chat-service 側でイベントが起きるたびに │
-                                             │
-  realtime-service ←── ChatEvent (メッセージ1) ←┤
-  realtime-service ←── ChatEvent (メッセージ2) ←┤
-  realtime-service ←── ChatEvent (編集通知)    ←┤
-                   ...（ストリームは開きっぱなし）
-```
-
-一方、**WebSocket 経由のメッセージ送信**（ユーザーがチャットで発言）では Server Streaming は使わない。
-realtime-service がすでにメッセージを持っているので、chat-service から教えてもらう必要がないため。
-
-#### メッセージ送信時の処理フロー
-
-realtime-service はメッセージを受け取ったら、**DB保存とブロードキャストを並行（goroutine）で実行する**。
-保存完了を待ってからブロードキャストすると遅延が大きくなるため、ユーザー体感を優先する設計。
-
-```
-ユーザーA が「こんにちは」を送信:
-
-  ブラウザA ──WebSocket──→ realtime-service が受信
-                                  │
-                  ┌───────────────┼───────────────┐
-                  │ (並行)        │               │ (並行)
-                  ▼               │               ▼
-          gRPC Unary で           │     Redis Pub/Sub で Publish
-          chat-service に保存      │     (channel:room:<room_id>)
-          (永続化)                │               │
-                  │               │               ▼
-                  ▼               │     同じ realtime-service が Subscribe
-            DB に保存完了          │     → Hub → ルーム内の WebSocket に書き込み
-                                  │               │
-                                  │               ▼
-                                  │     ユーザーB, C のブラウザに届く
-```
-
-> **1 インスタンス構成なのになぜ Redis を経由させるか**: 「WebSocket で受信する責務」と「Hub にブロードキャストする責務」をコード上で分離するため。同じプロセス内で publish → subscribe が往復するので冗長に見えるが、この構造により N インスタンスに増やしてもコード変更なしで動く。
-
-> **補足**: 保存に失敗した場合のリトライや整合性の担保は別途考慮が必要（Phase 4 ではまず基本形を実装）。
-
-#### Unary RPC と Server Streaming の違い
-
-Phase 3 で実装した gRPC は **Unary RPC**（1リクエスト → 1レスポンスで完結）。
-Server Streaming は同じ gRPC の上で動く別の通信パターンで、**1リクエスト → 複数レスポンスが次々と返ってくる**。
-
-「Server Streaming」の **Server は「ストリームを流す側」** を指す。このプロジェクトでは:
-
-- **chat-service（gRPC サーバー）**: レスポンスをN回送る（ストリームする側）
-- **realtime-service（gRPC クライアント）**: リクエストを1回送り、レスポンスをN回受け取る
-
-```
-Unary RPC（Phase 3 で実装済み）:
-  realtime-service ──リクエスト──→ chat-service
-  realtime-service ←──レスポンス── chat-service
-  （完了）
-  例: SaveMessage("こんにちは") → { id: "msg-1", ... }
-
-Server Streaming（Phase 4 で実装）:
-  realtime-service ──リクエスト──→ chat-service（gRPC サーバーがストリームを流す）
-  realtime-service ←── ChatEvent 1 ── chat-service
-  realtime-service ←── ChatEvent 2 ── chat-service
-  realtime-service ←── ChatEvent 3 ── chat-service
-              ...（chat-service が閉じるまで続く）
-  例: SubscribeMessages("room-456") → イベントが発生するたびに流れてくる
-```
-
-| | Unary RPC | Server Streaming |
-|---|---|---|
-| **レスポンス** | 1回 | 複数回（ストリーム） |
-| **接続** | リクエストごとに完結 | 開いたまま維持 |
-| **用途** | CRUD 操作（取得・作成・更新・削除） | リアルタイム通知、フィード配信 |
-| **Phase 3 の例** | `GetUser`, `CreateUser` | — |
-| **Phase 4 の例** | — | `SubscribeMessages` |
-
-#### gRPC の4つの通信パターン
-
-「Server」「Client」はストリームを **流す側** を指す名前。
-
-- [ ] gRPC Server Streaming の種類:
-
-| 種類 | 説明 | ユースケース |
-|------|------|-------------|
-| Unary | 1リクエスト → 1レスポンス（Phase 3 で実装済み） | CRUD 操作 |
-| Server Streaming | サーバーがストリームで返す（1リクエスト → レスポンス N個） | メッセージフィード、イベント通知 |
-| Client Streaming | クライアントがストリームで送る（リクエスト N個 → 1レスポンス） | ファイルアップロード、バッチ処理 |
-| Bidirectional Streaming | 双方がストリーム（リクエスト N個 ⇄ レスポンス N個） | チャット、リアルタイム同期 |
-
-- [ ] Server Streaming RPC の proto 定義
-- [ ] Server Streaming の実装（chat-service → realtime-service）
-- [ ] ストリームのライフサイクル管理
-- [ ] コンテキストキャンセルの適切なハンドリング
-- [ ] Bidirectional Streaming の基礎実装
-
-```protobuf
-// proto/chat/v1/realtime.proto
-service RealtimeService {
-  // Server Streaming: 新しいメッセージをストリームで受け取る
-  // returns の前に stream キーワードが付く
-  rpc SubscribeMessages(SubscribeRequest) returns (stream ChatEvent);
-
-  // Bidirectional Streaming: メッセージの送受信
-  // 引数と返り値の両方に stream が付く
-  rpc Chat(stream ChatMessage) returns (stream ChatEvent);
-}
-```
-
-**確認ポイント**: gRPC Server Streaming でメッセージをリアルタイムに受信できること。
+**確認ポイント**: `kubectl get pods -n envoy-gateway-system` で Running。
 
 ---
 
-### ステップ 5: Redis セットアップと Pub/Sub パターン
+### ステップ 3: Gateway リソース
 
-Redis を導入し、Pub/Sub によるメッセージ配信基盤を構築する。
-
-- [ ] Redis のインストール / Docker での起動
-- [ ] Redis の基本コマンド（GET, SET, EXPIRE, DEL）
-- [ ] `go-redis` パッケージの導入（`github.com/redis/go-redis/v9`）
-- [ ] Redis Pub/Sub の概念理解
-- [ ] チャネルの Subscribe / Publish 実装
-- [ ] メッセージのシリアライゼーション（JSON or protobuf）
-
-```go
-// Redis Pub/Sub の基本実装例
-func (s *RealtimeService) publishMessage(ctx context.Context, roomID string, msg *ChatMessage) error {
-    data, err := json.Marshal(msg)
-    if err != nil {
-        return fmt.Errorf("marshal message: %w", err)
-    }
-    channel := fmt.Sprintf("room:%s:messages", roomID)
-    return s.redis.Publish(ctx, channel, data).Err()
-}
-
-func (s *RealtimeService) subscribeRoom(ctx context.Context, roomID string) <-chan *ChatMessage {
-    channel := fmt.Sprintf("room:%s:messages", roomID)
-    sub := s.redis.Subscribe(ctx, channel)
-    msgCh := make(chan *ChatMessage)
-
-    go func() {
-        defer close(msgCh)
-        for msg := range sub.Channel() {
-            var chatMsg ChatMessage
-            if err := json.Unmarshal([]byte(msg.Payload), &chatMsg); err != nil {
-                slog.Error("unmarshal failed", "error", err)
-                continue
-            }
-            msgCh <- &chatMsg
-        }
-    }()
-
-    return msgCh
-}
+```yaml
+# deploy/gateway/gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata: {name: chat-gateway, namespace: chat-app}
+spec:
+  gatewayClassName: eg
+  listeners:
+    - {name: http,  protocol: HTTP, port: 80,    allowedRoutes: {namespaces: {from: Same}}}
+    - {name: grpc,  protocol: HTTP, port: 50051, allowedRoutes: {namespaces: {from: Same}, kinds: [{kind: GRPCRoute}]}}
 ```
 
-**確認ポイント**: Redis Pub/Sub 経由でメッセージが配信されること。
+**確認ポイント**: `kubectl get gateway -n chat-app` で `Programmed: True`。
 
 ---
 
-### ステップ 6: プレゼンス管理
+## B. ミドルウェアのデプロイ
 
-ユーザーのオンライン/オフライン状態を管理する。
+### ステップ 4: PostgreSQL + Redis を K8s 上に
 
-- [ ] プレゼンス状態の定義:
+Phase 1〜3 で `docker run` していた PostgreSQL と Redis を K8s 上に移す。
 
-| 状態 | 説明 |
-|------|------|
-| `online` | 接続中でアクティブ |
-| `away` | 接続中だが非アクティブ（一定時間操作なし） |
-| `offline` | 未接続 |
+- [ ] `deploy/postgres/statefulset.yaml` + `service.yaml` + `secret.yaml`
+- [ ] `deploy/redis/deployment.yaml` + `service.yaml`
+- [ ] `chatdb` を作る init script or Job
 
-- [ ] Redis を使ったプレゼンス管理（Sorted Set + TTL）
-- [ ] WebSocket 接続時にオンライン状態を設定
-- [ ] WebSocket 切断時にオフライン状態を設定
-- [ ] ハートビート（定期的な状態更新）
-- [ ] ルーム内のオンラインメンバー一覧取得
-- [ ] プレゼンス変更イベントのブロードキャスト
-
-```
-Redis データ構造:
-
-  presence:{user_id}  →  {"status": "online", "last_seen": "..."}  (TTL: 60s)
-  room:{room_id}:online  →  Sorted Set (member: user_id, score: timestamp)
+```bash
+kubectl apply -f deploy/postgres/
+kubectl apply -f deploy/redis/
 ```
 
-**確認ポイント**: ユーザーの接続/切断時にプレゼンス状態が正しく更新され、他のユーザーに通知されること。
+**確認ポイント**: `kubectl exec` で PostgreSQL / Redis に接続できる。
 
 ---
 
-### ステップ 7: N インスタンス拡張性の確認 (設計レビュー)
+## C. アプリケーションのデプロイ
 
-本プロジェクトの realtime-service は **1 インスタンスで動かす** (Docker Compose、学習目的)。このステップでは実際にスケールアウトはしないが、**作ったコードが N インスタンスに増やしても動くか** を設計レビューとして確認する。
+### ステップ 5: Dockerfile 作成 (3 サービス)
 
-#### Redis Pub/Sub を経由させた意図の再確認
+- [ ] `services/user-service/Dockerfile` (multi-stage)
+- [ ] `services/chat-service/Dockerfile`
+- [ ] `services/realtime-service/Dockerfile`
 
-Step 3〜6 で「WebSocket 受信 → Redis Publish → Redis Subscribe → Hub → WebSocket 書き込み」という流れで実装した。1 インスタンスなら明らかに冗長だが、以下の 2 つの責務が分離されている:
+```dockerfile
+# 例: services/user-service/Dockerfile
+FROM golang:1.22-alpine AS builder
+WORKDIR /src
+COPY go.work go.work.sum ./
+COPY gen/go ./gen/go
+COPY pkg ./pkg
+COPY services/user-service ./services/user-service
+WORKDIR /src/services/user-service
+RUN CGO_ENABLED=0 go build -o /app/user-service ./cmd/server
 
-| 責務 | 担当 |
-|------|------|
-| WebSocket で受信する | `conn.ReadMessage()` ループ → Redis に Publish |
-| ルーム宛のメッセージを配信する | Redis Subscribe ループ → Hub → `conn.WriteMessage()` |
-
-この分離により、publish 側と subscribe 側が **別インスタンスでも成立する** コードになっている。
-
-#### N インスタンス化した場合の動作
-
-```mermaid
-graph LR
-    CA[Client A] <-->|WS| RS1["realtime-service<br/>インスタンス1"]
-    CB[Client B] <-->|WS| RS2["realtime-service<br/>インスタンス2"]
-    RS1 -->|Publish channel:room:X| R[Redis]
-    RS2 -->|Publish channel:room:X| R
-    R -->|Subscribe| RS1
-    R -->|Subscribe| RS2
-    RS1 -.->|Hub: room:X の C を探す| CA
-    RS2 -.->|Hub: room:X の C を探す| CB
+FROM gcr.io/distroless/static
+COPY --from=builder /app/user-service /app/user-service
+EXPOSE 50051 8082
+ENTRYPOINT ["/app/user-service"]
 ```
 
-Client A が room:X に発言:
-1. RS1 が WebSocket で受信 → `channel:room:X` に Publish
-2. Redis が RS1 と RS2 両方の subscriber にメッセージを配信
-3. RS1 の Hub: room:X に所属する Client A に書き込み (自分の発言のエコー)
-4. RS2 の Hub: room:X に所属する Client B に書き込み
+```bash
+docker build -t user-service:0.1.0 -f services/user-service/Dockerfile .
+docker build -t chat-service:0.1.0 -f services/chat-service/Dockerfile .
+docker build -t realtime-service:0.1.0 -f services/realtime-service/Dockerfile .
 
-**コード変更なしで動作する** 点が重要。
-
-#### Redis Pub/Sub と Hub の役割分担
-
-配信には 2 段階の「範囲選び」がある。両方あって初めて「正しい相手にだけ届く」が実現する。
-
-```
-Redis Pub/Sub: どのインスタンスに届けるか (channel 単位)
-Hub:           そのインスタンス内のどの WebSocket に届けるか (room 単位)
+kind load docker-image user-service:0.1.0 chat-service:0.1.0 realtime-service:0.1.0 --name chat
 ```
 
-Hub がないと、Redis から受信したメッセージをインスタンス内の **全クライアント** に送ってしまう。
-
-```
-Hub なし（❌ 関係ない人にも届く）:
-  realtime-service
-  ┌──────────────────────────────────────────┐
-  │  Client B (room:123) ← 届く ✅ 正しい     │
-  │  Client C (room:123) ← 届く ✅ 正しい     │
-  │  Client X (room:999) ← 届く ❌ 関係ない   │
-  └──────────────────────────────────────────┘
-
-Hub あり（✅ 正しい相手だけに届く）:
-  realtime-service
-  ┌──────────────────────────────────────────┐
-  │  Hub                                     │
-  │   rooms["room:123"] → B, C              │
-  │   rooms["room:999"] → X                 │
-  │                                          │
-  │  room:123 宛て → B, C だけに送信 ✅       │
-  │  X には送らない ✅                        │
-  └──────────────────────────────────────────┘
-```
-
-| | Redis Pub/Sub | Hub |
-|---|---|---|
-| **範囲** | 該当 channel を subscribe しているインスタンス全て | 自インスタンス内の該当ルームのクライアントだけ |
-| **対象** | realtime-service プロセス同士 | WebSocket 接続（Client） |
-| **1 インスタンスでの役割** | 「受信」と「配信」の責務分離 | ルーム別のクライアント絞り込み |
-| **N インスタンス時の役割** | インスタンス間のメッセージ伝播 | 各インスタンス内のクライアント絞り込み |
-
-#### チェックリスト (1 インスタンスのまま確認)
-
-- [ ] publish 側と subscribe 側が別々の goroutine/コードに分離されているか
-- [ ] 全 realtime-service インスタンスで同じ channel 名 (`channel:room:<room_id>`) を購読しているか
-- [ ] 自分が publish したメッセージが自分に戻ってきても問題ないか (自分のクライアントにもエコーされる設計)
-- [ ] プレゼンス情報を Redis に持っているか (インメモリだとインスタンス間で共有できない)
-
-**確認ポイント**: 上記チェックリストが全て YES なら、docker compose で `--scale realtime-service=2` しても動くはず。実際のスケールアウト検証は本プロジェクトのスコープ外。
+**確認ポイント**: `docker image ls` でビルド成功、`kind` ノード上にロード済み。
 
 ---
 
-### ステップ 8: WebSocket の再接続とエラーハンドリング
+### ステップ 6: マイグレーション Job
 
-本番運用を見据えた堅牢な WebSocket 接続管理を実装する。
+Phase 1〜3 の `migrations/` SQL を K8s Job で流す。
 
-- [ ] サーバーサイドのエラーハンドリング:
+- [ ] SQL を ConfigMap として投入 (`kubectl create configmap --from-file`)
+- [ ] `migrate/migrate:4` イメージを使う Job
 
-| エラー | 対応 |
-|--------|------|
-| 読み取りエラー | 接続をクリーンに閉じ、リソースを解放 |
-| 書き込みエラー | クライアントをルームから除外 |
-| パニック | リカバリーミドルウェアでキャッチ |
-| 認証エラー | 適切なエラーコードで接続を拒否 |
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata: {name: user-service-migrate, namespace: chat-app}
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: migrate/migrate:4
+          command: [migrate, -path, /migrations, -database, "$(DATABASE_URL)", up]
+          env:
+            - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: user-service-secret, key: database-url}}}
+          volumeMounts: [{name: migrations, mountPath: /migrations}]
+      volumes:
+        - {name: migrations, configMap: {name: user-service-migrations}}
+```
 
-- [ ] クライアントサイドの再接続戦略:
+**確認ポイント**: Job が `Completed`、テーブルが作成されている。
 
-| 戦略 | 説明 |
-|------|------|
-| Exponential Backoff | 再試行間隔を指数的に増加（1s, 2s, 4s, 8s...） |
-| Jitter | ランダムな揺らぎを追加（サーバー負荷の分散） |
-| 最大リトライ回数 | 無限ループ防止 |
-| 再接続時の状態復元 | ルーム再参加、未読メッセージ取得 |
+---
 
-- [ ] 接続品質のモニタリング（ping/pong レイテンシ）
-- [ ] Graceful な接続終了（Close フレームの適切な送受信）
-- [ ] メッセージのバッファリング（一時的な切断時のメッセージ保持）
-- [ ] 負荷テストの基礎（複数同時接続のシミュレーション）
+### ステップ 7: 3 サービスの Deployment / Service
 
-**確認ポイント**: サーバー再起動後にクライアントが自動再接続し、通信が復旧すること。
+```yaml
+# deploy/services/user-service/deployment.yaml (抜粋)
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: user-service, namespace: chat-app}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: user-service}}
+  template:
+    metadata: {labels: {app: user-service}}
+    spec:
+      containers:
+        - name: user-service
+          image: user-service:0.1.0
+          ports:
+            - {containerPort: 50051, name: grpc}
+            - {containerPort: 8082, name: jwks-http}
+          env:
+            - {name: DATABASE_URL, valueFrom: {secretKeyRef: {name: user-service-secret, key: database-url}}}
+            - {name: JWT_PRIVATE_KEY, valueFrom: {secretKeyRef: {name: user-service-secret, key: jwt-private-key}}}
+          livenessProbe: {grpc: {port: 50051}}
+          readinessProbe: {grpc: {port: 50051}}
+```
+
+- [ ] user-service: gRPC :50051 + JWKS HTTP :8082
+- [ ] chat-service: gRPC :50052、環境変数に `USER_SERVICE_ADDR=user-service:50051`
+- [ ] realtime-service: WebSocket :8081、`CHAT_SERVICE_ADDR=chat-service:50052`、`REDIS_ADDR=redis:6379`
+
+**確認ポイント**: `kubectl get pods -n chat-app` で 3 サービス + PostgreSQL + Redis が Running。
+
+---
+
+## D. Envoy で JWT 検証 + REST 公開
+
+### ステップ 8: 公開 / 保護 Route の分離
+
+```yaml
+# deploy/gateway/user-public.yaml (JWT 不要)
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata: {name: user-public, namespace: chat-app}
+spec:
+  parentRefs: [{name: chat-gateway, sectionName: grpc}]
+  rules:
+    - matches:
+        - method: {service: user.v1.UserService, method: Login}
+        - method: {service: user.v1.UserService, method: Register}
+        - method: {service: user.v1.UserService, method: Refresh}
+        - method: {service: grpc.health.v1.Health}
+      backendRefs: [{name: user-service, port: 50051}]
+---
+# deploy/gateway/user-protected.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata: {name: user-protected, namespace: chat-app}
+spec:
+  parentRefs: [{name: chat-gateway, sectionName: grpc}]
+  rules:
+    - matches: [{method: {service: user.v1.UserService}}]
+      backendRefs: [{name: user-service, port: 50051}]
+---
+# deploy/gateway/chat-protected.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata: {name: chat-protected, namespace: chat-app}
+spec:
+  parentRefs: [{name: chat-gateway, sectionName: grpc}]
+  rules:
+    - matches: [{method: {service: chat.v1.ChatService}}]
+      backendRefs: [{name: chat-service, port: 50052}]
+---
+# deploy/gateway/realtime-ws.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata: {name: realtime-ws, namespace: chat-app}
+spec:
+  parentRefs: [{name: chat-gateway, sectionName: http}]
+  rules:
+    - matches: [{path: {type: PathPrefix, value: /ws}}]
+      backendRefs: [{name: realtime-service, port: 8081}]
+```
+
+**確認ポイント**: すべての Route が `Accepted: True`。
+
+---
+
+### ステップ 9: SecurityPolicy で JWT 検証
+
+各保護 Route に SecurityPolicy を貼る。Envoy が user-service の JWKS から公開鍵を取得して JWT を検証する。
+
+```yaml
+# deploy/gateway/jwt-auth-user.yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: {name: jwt-auth-user, namespace: chat-app}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: GRPCRoute
+    name: user-protected
+  jwt:
+    providers:
+      - name: chat-app
+        issuer: chat-app
+        remoteJWKS: {uri: http://user-service:8082/.well-known/jwks.json}
+        claimToHeaders:
+          - {claim: sub, header: x-user-id}
+          - {claim: preferred_username, header: x-username}
+---
+# deploy/gateway/jwt-auth-chat.yaml (同じ provider を chat-protected にも)
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata: {name: jwt-auth-chat, namespace: chat-app}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: GRPCRoute
+    name: chat-protected
+  jwt:
+    providers:
+      - name: chat-app
+        issuer: chat-app
+        remoteJWKS: {uri: http://user-service:8082/.well-known/jwks.json}
+        claimToHeaders:
+          - {claim: sub, header: x-user-id}
+```
+
+**確認ポイント**:
+- `SecurityPolicy` が `Accepted: True`
+- トークンなしで保護 RPC → Envoy が `Unauthenticated` を返す
+- 有効 JWT 付き → 成功、サービス側の `ctx` に `UserID` が入る
+
+---
+
+### ステップ 10: gRPC-JSON Transcoder で REST 公開
+
+proto の `google.api.http` アノテーション (Phase 1-2 で書いた) を使って REST API を自動公開する。Go で REST ハンドラは書かない。
+
+- [ ] `buf build -o descriptor.pb proto/` で proto descriptor set 生成
+- [ ] descriptor を ConfigMap に投入
+- [ ] `EnvoyPatchPolicy` で Transcoder Filter を Gateway に適用
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyPatchPolicy
+metadata: {name: grpc-json-transcoder, namespace: chat-app}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: chat-gateway
+  type: JSONPatch
+  jsonPatches:
+    - type: type.googleapis.com/envoy.config.listener.v3.Listener
+      name: chat-app/chat-gateway/http
+      operation:
+        op: add
+        path: /default_filter_chain/filters/0/typed_config/http_filters/0
+        value:
+          name: envoy.filters.http.grpc_json_transcoder
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+            proto_descriptor: /etc/envoy/descriptor.pb
+            services: [user.v1.UserService, chat.v1.ChatService]
+            convert_grpc_status: true
+```
+
+**確認ポイント**: `curl -X POST localhost:8080/api/v1/auth/login ...` で REST として叩ける。
+
+---
+
+## E. 信頼境界とレートリミット
+
+### ステップ 11: NetworkPolicy で直接アクセスを拒否
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: user-service-ingress, namespace: chat-app}
+spec:
+  podSelector: {matchLabels: {app: user-service}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: envoy-gateway-system}}
+        - podSelector: {matchLabels: {app: chat-service}}
+      ports:
+        - {protocol: TCP, port: 50051}
+        - {protocol: TCP, port: 8082}
+```
+
+同様の NetworkPolicy を chat-service と realtime-service にも。
+
+**確認ポイント**: 適当な Pod を立てて user-service に直接 Dial すると接続拒否される。
+
+---
+
+### ステップ 12: レートリミット
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata: {name: rate-limit, namespace: chat-app}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: GRPCRoute
+    name: user-protected
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        - limit: {requests: 100, unit: Minute}
+          clientSelectors:
+            - headers: [{name: x-user-id, type: Distinct}]
+```
+
+**確認ポイント**: 100 req/min を超えると `RESOURCE_EXHAUSTED`。
+
+---
+
+## F. end-to-end 検証
+
+### ステップ 13: フルフロー動作確認
+
+```bash
+# port-forward
+kubectl -n envoy-gateway-system port-forward svc/<gateway-svc-name> 8080:80 50051:50051
+
+# REST で Register + Login
+curl -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"alice@example.com","password":"password123",...}'
+
+ACCESS=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -d '{"email":"alice@example.com","password":"password123"}' | jq -r .access_token)
+
+# 保護 REST (JWT 必須)
+curl -X POST http://localhost:8080/api/v1/rooms \
+  -H "Authorization: Bearer $ACCESS" \
+  -d '{"name":"general","type":"GROUP"}'
+
+# 保護 gRPC (JWT 必須)
+grpcurl -plaintext -H "authorization: Bearer $ACCESS" \
+  localhost:50051 user.v1.UserService/GetUser
+
+# WebSocket
+wscat -c "ws://localhost:8080/ws?access_token=$ACCESS"
+```
+
+**確認ポイント**: REST / gRPC / WebSocket すべてが Envoy 経由で動き、認証が効いている。
 
 ---
 
 ## 成果物
 
-Phase 4 完了時に以下が動作していること:
+Phase 4 完了時 (= プロジェクト完了時) に以下が動作していること:
 
-- [x] WebSocket 経由でリアルタイムにメッセージが配信される
-- [x] ルームベースのメッセージブロードキャストが機能する
-- [x] gRPC Server Streaming でサービス間のリアルタイム通信ができる
-- [x] Redis Pub/Sub を経由した配信で受信と配信の責務が分離されている (N インスタンス拡張可能な設計)
-- [x] プレゼンス管理（オンライン/オフライン状態）が機能する
-- [x] WebSocket の再接続が自動で行われる
+- [ ] kind クラスタ上で 3 サービス + PostgreSQL + Redis + Envoy Gateway が稼働
+- [ ] Envoy Gateway が JWT 検証・REST 変換・ルーティングを YAML だけで実現
+- [ ] サービスの Go コードは Phase 3 から一切変更なし
+- [ ] REST / gRPC / WebSocket の 3 つの入口すべてで認証が効く
+- [ ] NetworkPolicy で Envoy 以外からの直接アクセスを物理的に拒否
+- [ ] レートリミット (100 req/min/user) が機能
 
-### サービス構成図（Phase 4 完了時）
+### サービス構成図 (Phase 4 = プロジェクト完了時)
 
 ```mermaid
 graph TD
-    Client[クライアント] -->|REST| GW["API Gateway (:8080)"]
-    Client -->|WSS| GW
+    Client[Client: browser / curl / grpcurl / wscat] -->|REST / gRPC / WebSocket| EG
 
-    GW -->|gRPC| US["user-svc<br/>REST :8001 / gRPC :50051"]
-    GW -->|gRPC| CS["chat-svc<br/>gRPC :50052"]
-    GW -->|WebSocket Proxy| RS["realtime-service<br/>WS :8081"]
+    subgraph "kind cluster"
+      EG["Envoy Gateway<br/>SecurityPolicy / Transcoder / Rate Limit"]
 
-    RS <-->|gRPC Server Streaming| CS
-    RS -->|gRPC Unary| CS
-    RS <-->|Redis Pub/Sub| Redis["Redis<br/>Pub/Sub / Presence"]
+      EG -->|JWKS 取得| JWKS[user-service JWKS :8082]
+      EG -->|gRPC + x-user-id| US[user-service :50051]
+      EG -->|gRPC + x-user-id| CS[chat-service :50052]
+      EG -->|WebSocket| RS[realtime-service :8081]
 
-    US --> PG1[("PG (user)")]
-    CS --> PG2[("PG (chat)")]
+      CS -->|gRPC + x-user-id| US
+      RS -->|gRPC Unary| CS
+      RS <-->|gRPC Server Streaming| CS
+      RS <-->|Pub/Sub| Redis[("Redis")]
+
+      US --> PG1[("userdb")]
+      CS --> PG2[("chatdb")]
+    end
 ```
 
 ---
@@ -649,50 +510,34 @@ graph TD
 
 | カテゴリ | 技術 | 用途 |
 |----------|------|------|
-| リアルタイム通信 | WebSocket | クライアントとの双方向通信 |
-| WebSocket ライブラリ | gorilla/websocket | Go WebSocket 実装 |
-| gRPC | Server Streaming | サービス間リアルタイム通信 |
-| インメモリ DB | Redis | Pub/Sub, プレゼンス, キャッシュ |
-| メッセージング | Redis Pub/Sub | 受信と配信の責務分離 + N インスタンス拡張の土台 |
-| 並行処理 | goroutine, channel | 非同期メッセージ処理、Hub パターン |
-| 拡張性 | Pub/Sub + Hub の 2 段階配信 | 1 インスタンスで動かしつつ N に拡張可能な設計 |
+| オーケストレーション | Kubernetes (kind) | ローカル完結の実行基盤 |
+| エッジ | Envoy Gateway | JWT / REST 変換 / Rate Limit |
+| 標準 | Gateway API | Ingress の後継 |
+| Helm | Envoy Gateway のインストール | |
+| 認証集約 | SecurityPolicy + JWKS | YAML だけで JWT 検証 |
+| REST 自動公開 | gRPC-JSON Transcoder | proto → REST |
+| 信頼境界 | NetworkPolicy | Envoy 以外からの直接アクセス拒否 |
+| レートリミット | BackendTrafficPolicy | YAML 宣言 |
+| マイグレーション | K8s Job | 本番風のスキーマ管理 |
 
 ---
 
 ## 参考リソース
 
-### 公式ドキュメント
-
-| リソース | URL | 説明 |
-|----------|-----|------|
-| gorilla/websocket | https://github.com/gorilla/websocket | Go WebSocket ライブラリ |
-| gRPC Server Streaming | https://grpc.io/docs/what-is-grpc/core-concepts/#server-streaming-rpc | gRPC Server Streaming の公式解説 |
-| go-redis | https://redis.uptrace.dev/ | Go Redis クライアントのドキュメント |
-| Redis Pub/Sub | https://redis.io/docs/interact/pubsub/ | Redis Pub/Sub の公式ドキュメント |
-
-### 書籍・コース
-
-| リソース | 著者 | 説明 |
-|----------|------|------|
-| Concurrency in Go | Katherine Cox-Buday | Go の並行処理パターンの解説書 |
-| Redis in Action | Josiah Carlson | Redis の実践的な活用方法 |
-| Go WebSocket Chat Tutorial | 各種ブログ | gorilla/websocket を使ったチャット実装チュートリアル |
-
-### ツール
-
-| ツール | 用途 |
-|--------|------|
-| wscat | WebSocket のコマンドラインクライアント |
-| Redis CLI | Redis の操作と確認 |
-| Redis Insight | Redis の GUI 管理ツール |
-| Docker Compose | 全サービスのローカル起動 |
+| リソース | URL |
+|----------|-----|
+| kind | https://kind.sigs.k8s.io/ |
+| Gateway API | https://gateway-api.sigs.k8s.io/ |
+| Envoy Gateway | https://gateway.envoyproxy.io/ |
+| SecurityPolicy | https://gateway.envoyproxy.io/docs/tasks/security/jwt-authentication/ |
+| gRPC-JSON Transcoder | https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/grpc_json_transcoder_filter |
 
 ---
 
 ## 前のフェーズ
 
-[Phase 3: gRPC + マルチサービス + API Gateway](./phase-3.md)
+[Phase 3: realtime-service](./phase-3.md)
 
-## 次のフェーズ
+## 完了後
 
-Phase 4 が最終フェーズ。ここまで完了した時点で、マイクロサービスの主要な構造 (REST + gRPC + WebSocket + 認証 + 複数サービス連携) が一通り揃った状態になる。
+Phase 4 が最終フェーズ。ここまで完了した時点で、マイクロサービスの主要な構造 (gRPC + REST Gateway + WebSocket + 認証 + 複数サービス連携 + Pub/Sub + K8s) が一通り揃う。Phase 1〜3 で Go に集中し、Phase 4 で K8s / Envoy に集中するという **技術軸で分離された学習フロー** が完結する。
