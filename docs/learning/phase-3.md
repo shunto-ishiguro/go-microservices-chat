@@ -1,608 +1,316 @@
-# Phase 3: リアルタイム通信 (WebSocket + gRPC Server Streaming)
+# Phase 3: gRPC + マルチサービス + API Gateway
 
 ---
 
 ## 学習目標
 
-本フェーズでは、WebSocket と gRPC Server Streaming を活用し、リアルタイムチャット機能を実現する。Redis Pub/Sub を用いたマルチインスタンス対応も学ぶ。
+本フェーズでは、Protocol Buffers と gRPC を学び、複数サービスが連携するマイクロサービスアーキテクチャの基礎を構築する。
 
 | # | 目標 | 詳細 |
 |---|------|------|
-| 1 | WebSocket を理解し実装できる | プロトコル理解、接続管理、メッセージ配信 |
-| 2 | gRPC Server Streaming を実装できる | サービス間のリアルタイム配信 |
-| 3 | Redis Pub/Sub を活用できる | インスタンス間メッセージ同期 |
-| 4 | リアルタイムアーキテクチャを設計できる | プレゼンス管理、ブロードキャスト |
-| 5 | スケーラブルな通信基盤を構築できる | マルチインスタンス対応 |
+| 1 | Protocol Buffers を理解する | proto3 構文、メッセージ型、サービス定義 |
+| 2 | gRPC サーバー/クライアントを実装できる | Unary RPC の実装と通信 |
+| 3 | マルチサービス構成を構築できる | user-service と chat-service の連携 |
+| 4 | Go Workspace でモノレポを管理できる | go.work を使った複数モジュール管理 |
+| 5 | 共有パッケージを整理できる | pkg/ ディレクトリによる共通コードの再利用 |
 
 ---
 
 ## 前提知識
 
-- **Phase 2 完了**: user-service と chat-service が gRPC で連携していること
-- goroutine と channel の基礎理解
-- gRPC の Unary RPC の実装経験
-- TCP/IP の基本概念
+- **Phase 2 完了**: user-service に自前 JWT 認証が実装されていること
+- Go の基本文法（構造体、インターフェース、エラーハンドリング）
+- HTTP サーバーと REST API の実装経験
+- PostgreSQL の基本操作
 
 ---
 
 ## ステップ
 
-### ステップ 1: WebSocket の基礎
-
-WebSocket プロトコルの仕組みを理解する。
-
-- [ ] WebSocket とは何か（双方向・全二重通信）
-- [ ] HTTP との違いと使い分け
-- [ ] WebSocket ハンドシェイクの仕組み（HTTP Upgrade）
-- [ ] フレーム構造（テキスト、バイナリ、ping/pong、close）
-- [ ] WebSocket のライフサイクル（接続 → 通信 → 切断）
-- [ ] セキュリティ考慮事項（Origin チェック、WSS）
-
-```mermaid
-sequenceDiagram
-    participant C as クライアント
-    participant S as サーバー
-    C->>S: HTTP GET (Upgrade: websocket)
-    S->>C: HTTP 101 Switching Protocols
-    Note over C,S: 双方向通信開始
-    C->>S: テキスト/バイナリフレーム
-    S->>C: テキスト/バイナリフレーム
-    C->>S: Close Frame
-    S->>C: Close Frame
-```
-
-**確認ポイント**: WebSocket のハンドシェイクと通信フローを説明できること。
-
----
-
-### ステップ 2: gorilla/websocket でサーバー実装
-
-Go で WebSocket サーバーを構築する。
-
-- [ ] `gorilla/websocket` パッケージの導入
-- [ ] `Upgrader` の設定（バッファサイズ、Origin チェック）
-- [ ] WebSocket 接続のハンドリング
-- [ ] メッセージの読み書き（`ReadMessage`, `WriteMessage`）
-- [ ] Ping/Pong によるヘルスチェック
-- [ ] 接続のタイムアウト設定
-- [ ] 簡易エコーサーバーの実装
-
-```go
-// WebSocket ハンドラーの基本構造
-var upgrader = websocket.Upgrader{
-    // ReadBufferSize: 受信用バッファ（クライアント→サーバー方向）
-    // WriteBufferSize: 送信用バッファ（サーバー→クライアント方向）
-    // 接続ごとに確保されるため、同時接続数 × バッファサイズ がメモリ消費に直結する。
-    // チャットのような短いメッセージが中心なら 1024 で十分。
-    // 送受信で特性が異なる場合（例: 受信は小さく送信は大きい）は別々の値を設定できる。
-    ReadBufferSize:  1024,
-    WriteBufferSize: 1024,
-    CheckOrigin: func(r *http.Request) bool {
-        // 本番では適切な Origin チェックを実装
-        return true
-    },
-}
-
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-    // Upgrade() で HTTP → WebSocket に切り替え、WebSocket 接続オブジェクト (conn) を取得する。
-    // conn (*websocket.Conn) は WebSocket 接続そのもので、以降の全送受信はこれを通じて行う。
-    conn, err := upgrader.Upgrade(w, r, nil)
-    if err != nil {
-        slog.Error("WebSocket upgrade failed", "error", err)
-        return
-    }
-    // 関数終了時に必ず接続を閉じる（忘れるとコネクションリーク）
-    defer conn.Close()
-
-    for {
-        // ReadMessage() はメッセージが届くまでブロックする。
-        // エラー（切断含む）が返ったらループを抜けて接続を閉じる。
-        msgType, msg, err := conn.ReadMessage()
-        if err != nil {
-            break
-        }
-        // WriteMessage() でクライアントにメッセージを送信する。
-        // 注意: 同時に1つの goroutine からしか呼べない。
-        // 複数 goroutine から送信したい場合はチャネルで1つの書き込み goroutine に集約する。
-        conn.WriteMessage(msgType, msg)
-    }
-}
-```
-
-**確認ポイント**: ブラウザまたは wscat から WebSocket 接続してメッセージをやり取りできること。
-
----
-
-### ステップ 3: realtime-service の実装
-
-リアルタイム通信専用の新サービスを構築する。
-
-- [ ] realtime-service のプロジェクト作成
-- [ ] 接続管理（Connection Manager / Hub パターン）
-- [ ] ルームベースのメッセージブロードキャスト
-- [ ] メッセージ型の定義:
-
-| メッセージ型 | 方向 | 説明 |
-|-------------|------|------|
-| `chat_message` | クライアント → サーバー | チャットメッセージ送信 |
-| `chat_message` | サーバー → クライアント | チャットメッセージ配信 |
-| `join_room` | クライアント → サーバー | ルーム参加 |
-| `leave_room` | クライアント → サーバー | ルーム退出 |
-| `presence_update` | サーバー → クライアント | プレゼンス状態変更通知 |
-| `error` | サーバー → クライアント | エラー通知 |
-
-- [ ] goroutine を活用した並行処理（読み取り/書き込みの分離）
-- [ ] チャネルベースのメッセージルーティング
-
-### Hub パターンの構造
-
-```mermaid
-graph TD
-    Hub["Hub<br/>rooms map / register ch<br/>unregister / broadcast"]
-    Hub --> RA["Room A<br/>clients"]
-    Hub --> RB["Room B<br/>clients"]
-    Hub --> RC["Room C<br/>clients"]
-    RA --> C1[C1]
-    RA --> C2[C2]
-    RA --> C3[C3]
-    RB --> C4[C4]
-    RB --> C5[C5]
-    RB --> C6[C6]
-    RC --> C7[C7]
-    RC --> C8[C8]
-    RC --> C9[C9]
-
-    style C1 fill:#e1f5fe
-    style C2 fill:#e1f5fe
-    style C3 fill:#e1f5fe
-    style C4 fill:#e1f5fe
-    style C5 fill:#e1f5fe
-    style C6 fill:#e1f5fe
-    style C7 fill:#e1f5fe
-    style C8 fill:#e1f5fe
-    style C9 fill:#e1f5fe
-```
-
-> C1〜C9 は WebSocket 接続
-
-#### Hub パターンとは
-
-WebSocket の **接続管理とメッセージ配信を一元的に行う中央管理パターン**。
-gorilla/websocket の公式チャットサンプルでも採用されている定番の設計。
-
-接続数やルーム数が増えると「誰がどのルームにいるか」「切断時にどこから消すか」「メッセージをどの接続に配信するか」の管理が煩雑になる。Hub がこれらを一手に引き受ける。
-
-#### コンポーネントの役割
-
-| コンポーネント | 役割 |
-|---|---|
-| **Hub** | 全体の管理者。チャネル経由でイベントを受け取り、ルームとクライアントを管理する |
-| **Room** | ルームごとのクライアント集合。ブロードキャスト対象を決める |
-| **Client** | 1つの WebSocket 接続に対応。読み取り/書き込み goroutine を持つ |
-
-#### 処理フロー
-
-```
-1. クライアント接続
-   conn を Upgrade → Client を作成 → Hub の register チャネルに送る → Hub がルームに追加
-
-2. メッセージ送信
-   Client の読み取り goroutine が ReadMessage() → Hub の broadcast チャネルに送る
-   → Hub が同じルームの全 Client に配信
-
-3. クライアント切断
-   ReadMessage() がエラーを返す → Hub の unregister チャネルに送る
-   → Hub がルームから削除、conn を Close
-```
-
-#### なぜチャネルを使うのか
-
-Hub は **1つの goroutine** で動き、チャネル経由でリクエストを受ける。
-`select` で1つずつ順番に処理するため、map への同時アクセスが起きず **mutex が不要** になる（Go らしい設計）。
-
-```go
-// Hub のメインループ（1 goroutine で実行）
-func (h *Hub) Run() {
-    for {
-        select {
-        case client := <-h.register:
-            // ルームにクライアントを追加（ロック不要）
-            h.rooms[client.roomID][client] = true
-
-        case client := <-h.unregister:
-            // ルームからクライアントを削除
-            delete(h.rooms[client.roomID], client)
-            close(client.send)
-
-        case msg := <-h.broadcast:
-            // ルーム内の全クライアントに配信
-            for client := range h.rooms[msg.roomID] {
-                client.send <- msg.data
-            }
-        }
-    }
-}
-```
-
-#### Client の goroutine 構造
-
-各 Client は **2つの goroutine** を持つ。これにより `conn.WriteMessage()` が常に1つの goroutine から呼ばれる制約を自然に満たせる。
-
-```go
-type Client struct {
-    hub    *Hub
-    conn   *websocket.Conn
-    roomID string
-    send   chan []byte  // Hub → Client へのメッセージ配信用
-}
-
-// 読み取り goroutine: conn.ReadMessage() → Hub に転送
-// 書き込み goroutine: send チャネルから受信 → conn.WriteMessage()
-```
-
-**確認ポイント**: 複数クライアントがルームに参加し、メッセージがブロードキャストされること。
-
----
-
-### ステップ 4: gRPC Server Streaming の実装
-
-gRPC の Streaming RPC を活用して、サービス間のリアルタイム通信を実現する。
-
-#### なぜ Redis Pub/Sub 統一ではなく gRPC Server Streaming を使うのか
-
-chat-service から realtime-service へリアルタイム配信する方法は2つある。
-
-```
-案A: chat-service が直接 Redis に Publish（シンプルだが結合が増える）
-  chat-service ──Redis Publish──→ 全 realtime-service
-  ❌ chat-service が Redis に依存 → サービス間の結合が増える
-  ❌ Redis は realtime-service の内部実装。他サービスが直接触るのは越境。
-
-案B: gRPC Server Streaming で realtime-service に流す（採用）
-  chat-service ──gRPC Server Streaming──→ realtime-service ──Redis Pub/Sub──→ 全インスタンス
-  ✅ chat-service は Redis の存在を知らない（疎結合）
-  ✅ 各サービスのデータストアは他サービスから直接触らない（マイクロサービスの原則）
-```
-
-| | Redis Pub/Sub 統一 | gRPC Server Streaming（採用） |
-|---|---|---|
-| **シンプルさ** | シンプル | やや複雑 |
-| **サービス間の結合** | chat-service が Redis に依存 | 疎結合を維持 |
-| **マイクロサービス原則** | 違反（データストアの共有） | 準拠 |
-| **インフラ変更時の影響** | Redis を変えたら両サービスに影響 | realtime-service だけで済む |
-
-> **学習プロジェクトとしての判断**: シンプルさだけで言えば Redis Pub/Sub 統一の方が楽だが、
-> ベストプラクティスを学ぶことが本リポジトリの目的なので gRPC Server Streaming を採用する。
-
-#### 各技術の担当区間
-
-```
-ブラウザ ←──WebSocket──→ realtime-service ←──gRPC Server Streaming──→ chat-service
-                              ↕
-                        Redis Pub/Sub
-                     (インスタンス間同期)
-```
-
-| 技術 | 区間 | 用途 |
-|---|---|---|
-| **WebSocket** | クライアント ⇄ realtime-service | ブラウザとの双方向通信（ブラウザは gRPC を直接扱えないため） |
-| **gRPC Server Streaming** | chat-service → realtime-service | サービス間のリアルタイム配信（疎結合を維持） |
-| **gRPC Unary** | realtime-service → chat-service | メッセージの保存（Phase 2 と同じ方式） |
-| **Redis Pub/Sub** | realtime-service インスタンス間 | 同一サービスのマルチインスタンス同期 |
-
-#### Server Streaming が使われる場面
-
-realtime-service は起動時に chat-service の `SubscribeMessages` に接続し、ストリームを開いたまま待機する。
-chat-service 側で新しいイベントが発生すると、このストリームを通じて realtime-service にプッシュされる。
-
-| ユースケース | 起点 | 流れ |
-|---|---|---|
-| **REST API 経由のメッセージ投稿** | 管理画面やモバイルアプリが REST で chat-service に投稿 | chat-service → Server Streaming → realtime-service → Hub → クライアント |
-| **システムメッセージ** | 「ユーザーAがルームに参加しました」等を chat-service が自動生成 | chat-service → Server Streaming → realtime-service → Hub → クライアント |
-| **メッセージの編集・削除通知** | REST API 経由でメッセージを編集/削除 | chat-service → Server Streaming → realtime-service → Hub → クライアント |
-
-共通点: **realtime-service が WebSocket で直接受け取っていないイベント** を、chat-service から教えてもらう必要がある。
-
-```
-realtime-service の起動時:
-
-  realtime-service ──SubscribeMessages()──→ chat-service
-                                             │
-  以降、chat-service 側でイベントが起きるたびに │
-                                             │
-  realtime-service ←── ChatEvent (メッセージ1) ←┤
-  realtime-service ←── ChatEvent (メッセージ2) ←┤
-  realtime-service ←── ChatEvent (編集通知)    ←┤
-                   ...（ストリームは開きっぱなし）
-```
-
-一方、**WebSocket 経由のメッセージ送信**（ユーザーがチャットで発言）では Server Streaming は使わない。
-realtime-service がすでにメッセージを持っているので、chat-service から教えてもらう必要がないため。
-
-#### メッセージ送信時の処理フロー
-
-realtime-service はメッセージを受け取ったら、**DB保存とブロードキャストを並行（goroutine）で実行する**。
-保存完了を待ってからブロードキャストすると遅延が大きくなるため、ユーザー体感を優先する設計。
-
-```
-ユーザーA が「こんにちは」を送信:
-
-  ブラウザA ──WebSocket──→ realtime-service が受信
-                                  │
-                  ┌───────────────┼───────────────┐
-                  │ (並行)        │               │ (並行)
-                  ▼               │               ▼
-          gRPC Unary で           │     Redis Pub/Sub で
-          chat-service に保存      │     全インスタンスに配信
-          (永続化)                │     → 各 Hub → クライアント
-                  │               │               │
-                  ▼               │               ▼
-            DB に保存完了          │     ユーザーB, C のブラウザに
-                                  │     WebSocket で即座に届く
-```
-
-> **補足**: 保存に失敗した場合のリトライや整合性の担保は別途考慮が必要（Phase 3 ではまず基本形を実装）。
-
-#### Unary RPC と Server Streaming の違い
-
-Phase 2 で実装した gRPC は **Unary RPC**（1リクエスト → 1レスポンスで完結）。
-Server Streaming は同じ gRPC の上で動く別の通信パターンで、**1リクエスト → 複数レスポンスが次々と返ってくる**。
-
-「Server Streaming」の **Server は「ストリームを流す側」** を指す。このプロジェクトでは:
-
-- **chat-service（gRPC サーバー）**: レスポンスをN回送る（ストリームする側）
-- **realtime-service（gRPC クライアント）**: リクエストを1回送り、レスポンスをN回受け取る
-
-```
-Unary RPC（Phase 2 で実装済み）:
-  realtime-service ──リクエスト──→ chat-service
-  realtime-service ←──レスポンス── chat-service
-  （完了）
-  例: SaveMessage("こんにちは") → { id: "msg-1", ... }
-
-Server Streaming（Phase 3 で実装）:
-  realtime-service ──リクエスト──→ chat-service（gRPC サーバーがストリームを流す）
-  realtime-service ←── ChatEvent 1 ── chat-service
-  realtime-service ←── ChatEvent 2 ── chat-service
-  realtime-service ←── ChatEvent 3 ── chat-service
-              ...（chat-service が閉じるまで続く）
-  例: SubscribeMessages("room-456") → イベントが発生するたびに流れてくる
-```
-
-| | Unary RPC | Server Streaming |
-|---|---|---|
-| **レスポンス** | 1回 | 複数回（ストリーム） |
-| **接続** | リクエストごとに完結 | 開いたまま維持 |
-| **用途** | CRUD 操作（取得・作成・更新・削除） | リアルタイム通知、フィード配信 |
-| **Phase 2 の例** | `GetUser`, `CreateUser` | — |
-| **Phase 3 の例** | — | `SubscribeMessages` |
-
-#### gRPC の4つの通信パターン
-
-「Server」「Client」はストリームを **流す側** を指す名前。
-
-- [ ] gRPC Server Streaming の種類:
-
-| 種類 | 説明 | ユースケース |
-|------|------|-------------|
-| Unary | 1リクエスト → 1レスポンス（Phase 2 で実装済み） | CRUD 操作 |
-| Server Streaming | サーバーがストリームで返す（1リクエスト → レスポンス N個） | メッセージフィード、イベント通知 |
-| Client Streaming | クライアントがストリームで送る（リクエスト N個 → 1レスポンス） | ファイルアップロード、バッチ処理 |
-| Bidirectional Streaming | 双方がストリーム（リクエスト N個 ⇄ レスポンス N個） | チャット、リアルタイム同期 |
-
-- [ ] Server Streaming RPC の proto 定義
-- [ ] Server Streaming の実装（chat-service → realtime-service）
-- [ ] ストリームのライフサイクル管理
-- [ ] コンテキストキャンセルの適切なハンドリング
-- [ ] Bidirectional Streaming の基礎実装
+### ステップ 1: Protocol Buffers の基礎
+
+Protocol Buffers（protobuf）のスキーマ定義言語を学ぶ。
+
+- [ ] Protocol Buffers とは何か（バイナリシリアライゼーション形式）
+- [ ] proto3 構文の基本
+- [ ] メッセージ型の定義（scalar types, repeated, oneof, map）
+- [ ] サービス定義（rpc メソッド）
+- [ ] `protoc` コンパイラのインストール
+- [ ] Go 用プラグイン（`protoc-gen-go`, `protoc-gen-go-grpc`）の設定
+- [ ] Buf CLI の導入と `buf.yaml`, `buf.gen.yaml` の設定
 
 ```protobuf
-// proto/chat/v1/realtime.proto
-service RealtimeService {
-  // Server Streaming: 新しいメッセージをストリームで受け取る
-  // returns の前に stream キーワードが付く
-  rpc SubscribeMessages(SubscribeRequest) returns (stream ChatEvent);
+// proto/user/v1/user.proto の例
+syntax = "proto3";
+package user.v1;
 
-  // Bidirectional Streaming: メッセージの送受信
-  // 引数と返り値の両方に stream が付く
-  rpc Chat(stream ChatMessage) returns (stream ChatEvent);
+message User {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+service UserService {
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  rpc ListUsers(ListUsersRequest) returns (ListUsersResponse);
 }
 ```
 
-**確認ポイント**: gRPC Server Streaming でメッセージをリアルタイムに受信できること。
+**確認ポイント**: `.proto` ファイルから Go コードが自動生成され、型が利用できること。
 
 ---
 
-### ステップ 5: Redis セットアップと Pub/Sub パターン
+### ステップ 2: Go での gRPC サーバー/クライアント実装
 
-Redis を導入し、Pub/Sub によるメッセージ配信基盤を構築する。
+gRPC の基本的なサーバーとクライアントを実装する。
 
-- [ ] Redis のインストール / Docker での起動
-- [ ] Redis の基本コマンド（GET, SET, EXPIRE, DEL）
-- [ ] `go-redis` パッケージの導入（`github.com/redis/go-redis/v9`）
-- [ ] Redis Pub/Sub の概念理解
-- [ ] チャネルの Subscribe / Publish 実装
-- [ ] メッセージのシリアライゼーション（JSON or protobuf）
+- [ ] gRPC の概念理解（HTTP/2, ストリーミング, メタデータ）
+- [ ] `google.golang.org/grpc` パッケージの導入
+- [ ] gRPC サーバーの起動と登録
+- [ ] Unary RPC の実装（リクエスト → レスポンス）
+- [ ] gRPC クライアントの実装（`grpc.Dial`, `grpc.NewClient`）
+- [ ] メタデータの送受信
+- [ ] gRPC ステータスコードとエラーハンドリング（`status`, `codes` パッケージ）
+- [ ] gRPC リフレクション（`grpcurl` でのテスト用）
 
-```go
-// Redis Pub/Sub の基本実装例
-func (s *RealtimeService) publishMessage(ctx context.Context, roomID string, msg *ChatMessage) error {
-    data, err := json.Marshal(msg)
-    if err != nil {
-        return fmt.Errorf("marshal message: %w", err)
-    }
-    channel := fmt.Sprintf("room:%s:messages", roomID)
-    return s.redis.Publish(ctx, channel, data).Err()
-}
-
-func (s *RealtimeService) subscribeRoom(ctx context.Context, roomID string) <-chan *ChatMessage {
-    channel := fmt.Sprintf("room:%s:messages", roomID)
-    sub := s.redis.Subscribe(ctx, channel)
-    msgCh := make(chan *ChatMessage)
-
-    go func() {
-        defer close(msgCh)
-        for msg := range sub.Channel() {
-            var chatMsg ChatMessage
-            if err := json.Unmarshal([]byte(msg.Payload), &chatMsg); err != nil {
-                slog.Error("unmarshal failed", "error", err)
-                continue
-            }
-            msgCh <- &chatMsg
-        }
-    }()
-
-    return msgCh
-}
-```
-
-**確認ポイント**: Redis Pub/Sub 経由でメッセージが配信されること。
+**確認ポイント**: gRPC サーバーが起動し、`grpcurl` でメソッドを呼び出せること。
 
 ---
 
-### ステップ 6: プレゼンス管理
+### ステップ 3: chat-service の gRPC サービス実装
 
-ユーザーのオンライン/オフライン状態を管理する。
+チャット機能の中核となる chat-service を新規実装する。
 
-- [ ] プレゼンス状態の定義:
+- [ ] chat-service のプロジェクト作成（Phase 1 と同じ構成）
+- [ ] proto 定義:
 
-| 状態 | 説明 |
-|------|------|
-| `online` | 接続中でアクティブ |
-| `away` | 接続中だが非アクティブ（一定時間操作なし） |
-| `offline` | 未接続 |
+| サービス | メソッド | 説明 |
+|----------|----------|------|
+| `ChatRoomService` | `CreateRoom` | チャットルーム作成 |
+| `ChatRoomService` | `GetRoom` | ルーム情報取得 |
+| `ChatRoomService` | `ListRooms` | ルーム一覧取得 |
+| `ChatRoomService` | `AddMember` | メンバー追加 |
+| `ChatRoomService` | `RemoveMember` | メンバー削除 |
+| `MessageService` | `SendMessage` | メッセージ送信 |
+| `MessageService` | `GetMessages` | メッセージ履歴取得 |
 
-- [ ] Redis を使ったプレゼンス管理（Sorted Set + TTL）
-- [ ] WebSocket 接続時にオンライン状態を設定
-- [ ] WebSocket 切断時にオフライン状態を設定
-- [ ] ハートビート（定期的な状態更新）
-- [ ] ルーム内のオンラインメンバー一覧取得
-- [ ] プレゼンス変更イベントのブロードキャスト
+- [ ] PostgreSQL テーブル設計（rooms, room_members, messages）
+- [ ] Repository パターンの適用
+- [ ] Service 層の実装
+- [ ] gRPC ハンドラーの実装
 
-```
-Redis データ構造:
-
-  presence:{user_id}  →  {"status": "online", "last_seen": "..."}  (TTL: 60s)
-  room:{room_id}:online  →  Sorted Set (member: user_id, score: timestamp)
-```
-
-> **応用**: タイピングインジケーター（「入力中...」表示）も同じパターンで実装可能。Redis に `typing:{room}:{user}` を TTL 付きで SET し、ルーム内にブロードキャストするだけ。
-
-**確認ポイント**: ユーザーの接続/切断時にプレゼンス状態が正しく更新され、他のユーザーに通知されること。
+**確認ポイント**: chat-service 単体でルーム管理とメッセージの CRUD ができること。
 
 ---
 
-### ステップ 7: マルチインスタンス対応
+### ステップ 4: user-service を gRPC 対応に拡張
 
-Redis Pub/Sub を使って複数の realtime-service インスタンス間でメッセージを同期する。
+既存の user-service に gRPC エンドポイントを追加する。
 
-- [ ] 単一インスタンスの限界を理解する
-- [ ] Redis Pub/Sub によるインスタンス間メッセージ同期
-- [ ] アーキテクチャ設計:
+- [ ] user-service の proto ファイル作成
+- [ ] gRPC サーバーの追加（REST と gRPC を同時に提供）
+- [ ] 既存の Service 層を gRPC ハンドラーから呼び出す
+- [ ] ポート設計:
 
-```mermaid
-graph LR
-    CA[クライアントA] --> RS1["realtime-service<br/>(インスタンス1)"]
-    RS1 <--> Redis["Redis Pub/Sub<br/>共通チャネル"]
-    Redis <--> RS2["realtime-service<br/>(インスタンス2)"]
-    CB[クライアントB] --> RS2
-```
+| サービス | REST ポート | gRPC ポート |
+|----------|------------|------------|
+| user-service | `:8001` (既存) | `:50051` (Phase 3 で追加) |
+| chat-service | (なし、内部のみ) | `:50052` |
 
-- [ ] ローカル Hub + Redis Pub/Sub のハイブリッド構成
-- [ ] メッセージの重複排除（冪等性の確保）
-- [ ] インスタンス間のプレゼンス情報同期
-- [ ] Docker Compose で複数インスタンスを起動してテスト
+- [ ] Graceful Shutdown で両サーバーを安全に停止
+
+**確認ポイント**: user-service が REST と gRPC の両方で同じ機能を提供できること。
+
+---
+
+### ステップ 5: サービス間 gRPC 通信
+
+chat-service から user-service を gRPC で呼び出す。
+
+- [ ] chat-service に user-service の gRPC クライアントを組み込む
+- [ ] ルーム作成時にユーザー存在確認（user-service への問い合わせ）
+- [ ] メッセージ送信時の送信者検証
+- [ ] コネクション管理（接続プール、タイムアウト設定）
+- [ ] リトライロジック（基本的な再試行）
+- [ ] サーキットブレーカーの概念理解（実装は後のフェーズ）
 
 ```mermaid
 graph TD
-    Redis["Redis Pub/Sub<br/>channel: room:{id}:messages<br/>channel: room:{id}:presence"]
-
-    Redis <--> I1
-    Redis <--> I2
-
-    subgraph I1["realtime-svc インスタンス1"]
-        Hub1[Local Hub]
-        Hub1 --> C1[C1]
-        Hub1 --> C2[C2]
-    end
-
-    subgraph I2["realtime-svc インスタンス2"]
-        Hub2[Local Hub]
-        Hub2 --> C3[C3]
-        Hub2 --> C4[C4]
-    end
+    CS["chat-service<br/>:50052"] -->|gRPC| US["user-service<br/>:50051"]
+    CS --> PG1[("PostgreSQL<br/>chatdb")]
+    US --> PG2[("PostgreSQL<br/>userdb")]
 ```
 
-#### Redis Pub/Sub と Hub の役割分担
-
-Redis Pub/Sub と Hub は **配信する範囲が違う**。両方あって初めて「正しい相手にだけ届く」が実現する。
-
-```
-Redis Pub/Sub: どのインスタンスに届けるか（建物を選ぶ）
-Hub:           どのクライアントに届けるか（部屋を選ぶ）
-```
-
-Hub がないと、Redis から受信したメッセージをインスタンス内の **全クライアント** に送ってしまう。
-
-```
-Hub なし（❌ 関係ない人にも届く）:
-  realtime-service (インスタンス1)
-  ┌──────────────────────────────────────────┐
-  │  Client B (room:123) ← 届く ✅ 正しい     │
-  │  Client C (room:123) ← 届く ✅ 正しい     │
-  │  Client X (room:999) ← 届く ❌ 関係ない   │
-  └──────────────────────────────────────────┘
-
-Hub あり（✅ 正しい相手だけに届く）:
-  realtime-service (インスタンス1)
-  ┌──────────────────────────────────────────┐
-  │  Hub                                     │
-  │   rooms["room:123"] → B, C              │
-  │   rooms["room:999"] → X                 │
-  │                                          │
-  │  room:123 宛て → B, C だけに送信 ✅       │
-  │  X には送らない ✅                        │
-  └──────────────────────────────────────────┘
-```
-
-| | Redis Pub/Sub | Hub |
-|---|---|---|
-| **範囲** | 全インスタンスに配る | 自インスタンス内の該当ルームのクライアントだけに配る |
-| **対象** | realtime-service 同士 | WebSocket 接続（Client） |
-| **なかったら** | 別インスタンスのクライアントに届かない | 同じインスタンス内の関係ないクライアントにも届いてしまう |
-
-**確認ポイント**: 異なるインスタンスに接続したクライアント間でメッセージが正しく配信されること。
+**確認ポイント**: chat-service がユーザー情報を user-service から取得してルーム作成できること。
 
 ---
 
-### ステップ 8: WebSocket の再接続とエラーハンドリング
+### ステップ 6: Go Workspace (go.work) でモノレポ管理
 
-本番運用を見据えた堅牢な WebSocket 接続管理を実装する。
+Go Workspace を使って複数サービスを効率的に管理する。
 
-- [ ] サーバーサイドのエラーハンドリング:
+- [ ] `go.work` ファイルの作成（`go work init`）
+- [ ] 各サービスモジュールの登録（`go work use`）
+- [ ] ローカルモジュール参照の理解（replace 不要）
+- [ ] 共有 proto パッケージの参照設定
+- [ ] IDE（VS Code）での Workspace 対応設定
 
-| エラー | 対応 |
-|--------|------|
-| 読み取りエラー | 接続をクリーンに閉じ、リソースを解放 |
-| 書き込みエラー | クライアントをルームから除外 |
-| パニック | リカバリーミドルウェアでキャッチ |
-| 認証エラー | 適切なエラーコードで接続を拒否 |
+```
+cloud-native-chat-platform/
+├── go.work
+├── go.work.sum
+├── proto/                  # proto 定義
+│   ├── user/v1/
+│   └── chat/v1/
+├── gen/                    # 自動生成コード
+│   └── go/
+├── services/
+│   ├── user-service/       # go.mod
+│   └── chat-service/       # go.mod
+└── pkg/                    # 共有パッケージ（go.mod）
+```
 
-- [ ] クライアントサイドの再接続戦略:
+**確認ポイント**: `go work` 環境で全サービスのビルドとテストが通ること。
 
-| 戦略 | 説明 |
-|------|------|
-| Exponential Backoff | 再試行間隔を指数的に増加（1s, 2s, 4s, 8s...） |
-| Jitter | ランダムな揺らぎを追加（サーバー負荷の分散） |
-| 最大リトライ回数 | 無限ループ防止 |
-| 再接続時の状態復元 | ルーム再参加、未読メッセージ取得 |
+---
 
-- [ ] 接続品質のモニタリング（ping/pong レイテンシ）
-- [ ] Graceful な接続終了（Close フレームの適切な送受信）
-- [ ] メッセージのバッファリング（一時的な切断時のメッセージ保持）
-- [ ] 負荷テストの基礎（複数同時接続のシミュレーション）
+### ステップ 7: pkg/ 共有パッケージの整理
 
-**確認ポイント**: サーバー再起動後にクライアントが自動再接続し、通信が復旧すること。
+サービス間で共通利用するパッケージを整理する。
+
+- [ ] `pkg/logger` - 共通ログ設定（slog ベース）
+- [ ] `pkg/middleware` - 共通ミドルウェア（認証、ログ、リカバリー）
+- [ ] `pkg/config` - 共通設定読み込み（環境変数, YAML）
+- [ ] `pkg/errors` - 共通エラー型
+- [ ] `pkg/grpcutil` - gRPC ユーティリティ（インターセプター等）
+
+| パッケージ | 役割 | 利用サービス |
+|-----------|------|-------------|
+| `pkg/logger` | 構造化ログの統一 | 全サービス |
+| `pkg/middleware` | HTTP/gRPC ミドルウェア | 全サービス |
+| `pkg/config` | 設定管理の統一 | 全サービス |
+| `pkg/errors` | エラーコードの統一 | 全サービス |
+| `pkg/grpcutil` | gRPC 共通処理 | gRPC 対応サービス |
+
+**確認ポイント**: 各サービスが `pkg/` の共通パッケージを import して利用できること。
+
+---
+
+### ステップ 8: gRPC のテスト
+
+gRPC サービスのテスト手法を学ぶ。
+
+- [ ] `bufconn` を使ったインメモリ gRPC テスト
+- [ ] テスト用 gRPC サーバーのセットアップ
+- [ ] Unary RPC のテスト
+- [ ] エラーケースのテスト（NotFound, InvalidArgument 等）
+- [ ] モックサービスの作成（サービス間通信のテスト用）
+- [ ] インテグレーションテストの整理
+
+```go
+// bufconn を使ったテストの例
+func setupTestServer(t *testing.T) *grpc.ClientConn {
+    lis := bufconn.Listen(1024 * 1024)
+    srv := grpc.NewServer()
+    // サービス登録
+    pb.RegisterUserServiceServer(srv, newTestUserService())
+    go srv.Serve(lis)
+
+    conn, err := grpc.DialContext(ctx, "bufnet",
+        grpc.WithContextDialer(func(ctx context.Context, s string) (net.Conn, error) {
+            return lis.DialContext(ctx)
+        }),
+        grpc.WithTransportCredentials(insecure.NewCredentials()),
+    )
+    require.NoError(t, err)
+    return conn
+}
+```
+
+**確認ポイント**: `go test ./...` で gRPC サービスのテストが PASS すること。
+
+---
+
+### ステップ 9: API Gateway の基礎実装
+
+外部クライアント向けに REST → gRPC 変換を行うゲートウェイを構築する。
+
+- [ ] API Gateway の役割と設計方針
+- [ ] grpc-gateway の導入（proto アノテーション）
+- [ ] REST エンドポイントから gRPC サービスへの変換
+- [ ] 統一的なエラーレスポンス
+- [ ] CORS 設定
+- [ ] 基本的なレートリミット（概念理解）
+
+| REST エンドポイント | gRPC メソッド | サービス |
+|--------------------|--------------|---------|
+| `POST /api/v1/users` | `UserService.CreateUser` | user-service |
+| `GET /api/v1/users/{id}` | `UserService.GetUser` | user-service |
+| `POST /api/v1/rooms` | `ChatRoomService.CreateRoom` | chat-service |
+| `POST /api/v1/rooms/{id}/messages` | `MessageService.SendMessage` | chat-service |
+
+**確認ポイント**: REST リクエストが API Gateway 経由で gRPC サービスに正しくルーティングされること。
+
+---
+
+### ステップ 10: 認証の伝搬 (Phase 2 の資産を API Gateway に移す)
+
+Phase 2 で user-service 単体に実装した JWT 検証を **API Gateway に集約** し、内部 gRPC サービスには認証済みユーザー情報だけを伝搬させる。
+
+#### 信頼境界の再設計
+
+| | Phase 2 時点 | Phase 3 で変える |
+|--|-------------|---------------|
+| JWT 検証の場所 | user-service の REST ミドルウェア | API Gateway (外部境界) に集約 |
+| 内部サービスの認証 | REST で JWT を受け取り検証 | gRPC メタデータ `x-user-id` を信頼 |
+| 信頼の根拠 | JWT 自体 | Docker ネットワーク内部であること |
+
+- [ ] API Gateway に `pkg/auth.TokenVerifier` を組み込む (Phase 2 で作ったものをそのまま import)
+- [ ] API Gateway の REST 入口で JWT 検証ミドルウェアを適用
+- [ ] 検証成功後、下流 gRPC 呼び出しに `x-user-id` メタデータを注入:
+
+```go
+// API Gateway のクライアントインターセプターで user_id をメタデータに注入
+func injectUserID(ctx context.Context) context.Context {
+    claims, ok := middleware.ClaimsFromContext(ctx)
+    if !ok {
+        return ctx
+    }
+    return metadata.AppendToOutgoingContext(ctx,
+        "x-user-id", claims.UserID,
+        "x-username", claims.Username,
+    )
+}
+```
+
+- [ ] 各 gRPC サービス (user-service, chat-service) に **サーバーインターセプター** を追加し、メタデータから `user_id` を取り出して `context.Context` に詰める:
+
+```go
+func AuthInterceptor() grpc.UnaryServerInterceptor {
+    return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+        md, ok := metadata.FromIncomingContext(ctx)
+        if !ok {
+            return nil, status.Error(codes.Unauthenticated, "missing metadata")
+        }
+        ids := md.Get("x-user-id")
+        if len(ids) == 0 {
+            return nil, status.Error(codes.Unauthenticated, "missing x-user-id")
+        }
+        ctx = context.WithValue(ctx, userIDKey, ids[0])
+        return handler(ctx, req)
+    }
+}
+```
+
+- [ ] user-service 側の「REST 経由の JWT 検証ミドルウェア」は撤去 (API Gateway が境界になったので、user-service の REST は直接外に公開しない)
+- [ ] 認証不要なエンドポイント (`/api/v1/auth/login` など) は API Gateway で白リストに入れる
+
+**確認ポイント**:
+- 有効な JWT でリクエスト → API Gateway が 200 を返し、downstream の `context` に `user_id` が届く
+- 無効な JWT → API Gateway が 401 を返す (gRPC サービスには到達しない)
+- gRPC サービスを直接叩く (ゲートウェイを経由しない) と `x-user-id` が無いので `Unauthenticated` が返る
 
 ---
 
@@ -610,30 +318,25 @@ Hub あり（✅ 正しい相手だけに届く）:
 
 Phase 3 完了時に以下が動作していること:
 
-- [x] WebSocket 経由でリアルタイムにメッセージが配信される
-- [x] ルームベースのメッセージブロードキャストが機能する
-- [x] gRPC Server Streaming でサービス間のリアルタイム通信ができる
-- [x] Redis Pub/Sub でマルチインスタンスに対応している
-- [x] プレゼンス管理（オンライン/オフライン状態）が機能する
-- [x] WebSocket の再接続が自動で行われる
+- [x] user-service が REST + gRPC 両方のエンドポイントを提供する
+- [x] chat-service が gRPC でルーム管理・メッセージ管理を提供する
+- [x] chat-service → user-service の gRPC 通信が動作する
+- [x] Go Workspace でモノレポが管理されている
+- [x] 共有パッケージ（pkg/）が整理されている
+- [x] gRPC テスト（bufconn）が整備されている
+- [x] API Gateway が REST → gRPC 変換を行う
+- [x] API Gateway が JWT 検証の境界になり、`x-user-id` が gRPC メタデータで内部サービスに伝搬する
 
-### サービス構成図（Phase 3 完了時）
+### サービス構成図
 
 ```mermaid
 graph TD
-    Client[クライアント] -->|REST| GW["API Gateway (:8080)"]
-    Client -->|WSS| GW
-
-    GW -->|gRPC| US["user-svc :9081"]
-    GW -->|gRPC| CS["chat-svc :9082"]
-    GW -->|WebSocket Proxy| RS["realtime-service (:8083)"]
-
-    RS <-->|gRPC Server Streaming| CS
-    RS -->|gRPC Unary| CS
-    RS <-->|Redis Pub/Sub| Redis["Redis<br/>Pub/Sub / Presence"]
-
-    US --> PG1[("PG (user)")]
-    CS --> PG2[("PG (chat)")]
+    Client[クライアント] -->|REST| GW["API Gateway<br/>:8080"]
+    GW -->|gRPC| US["user-service<br/>REST :8001 / gRPC :50051"]
+    GW -->|gRPC| CS["chat-service<br/>gRPC :50052"]
+    US --> PG1[("PostgreSQL userdb")]
+    CS --> PG2[("PostgreSQL chatdb")]
+    CS -->|gRPC| US
 ```
 
 ---
@@ -642,12 +345,12 @@ graph TD
 
 | カテゴリ | 技術 | 用途 |
 |----------|------|------|
-| リアルタイム通信 | WebSocket | クライアントとの双方向通信 |
-| WebSocket ライブラリ | gorilla/websocket | Go WebSocket 実装 |
-| gRPC | Server Streaming | サービス間リアルタイム通信 |
-| インメモリ DB | Redis | Pub/Sub, プレゼンス, キャッシュ |
-| メッセージング | Redis Pub/Sub | インスタンス間メッセージ同期 |
-| 並行処理 | goroutine, channel | 非同期メッセージ処理 |
+| シリアライゼーション | Protocol Buffers (proto3) | API スキーマ定義 |
+| RPC フレームワーク | gRPC | サービス間通信 |
+| コード生成 | Buf CLI | proto 管理とコード生成 |
+| ワークスペース | go.work | モノレポ管理 |
+| API Gateway | grpc-gateway | REST → gRPC 変換 |
+| テスト | bufconn | gRPC インメモリテスト |
 
 ---
 
@@ -657,35 +360,33 @@ graph TD
 
 | リソース | URL | 説明 |
 |----------|-----|------|
-| gorilla/websocket | https://github.com/gorilla/websocket | Go WebSocket ライブラリ |
-| gRPC Server Streaming | https://grpc.io/docs/what-is-grpc/core-concepts/#server-streaming-rpc | gRPC Server Streaming の公式解説 |
-| go-redis | https://redis.uptrace.dev/ | Go Redis クライアントのドキュメント |
-| Redis Pub/Sub | https://redis.io/docs/interact/pubsub/ | Redis Pub/Sub の公式ドキュメント |
+| gRPC Go Quick Start | https://grpc.io/docs/languages/go/quickstart/ | gRPC Go の公式クイックスタート |
+| Protocol Buffers Guide | https://protobuf.dev/programming-guides/proto3/ | proto3 言語ガイド |
+| Buf Documentation | https://buf.build/docs/ | Buf CLI の公式ドキュメント |
+| grpc-gateway | https://grpc-ecosystem.github.io/grpc-gateway/ | grpc-gateway の公式ドキュメント |
 
 ### 書籍・コース
 
 | リソース | 著者 | 説明 |
 |----------|------|------|
-| Concurrency in Go | Katherine Cox-Buday | Go の並行処理パターンの解説書 |
-| Redis in Action | Josiah Carlson | Redis の実践的な活用方法 |
-| Go WebSocket Chat Tutorial | 各種ブログ | gorilla/websocket を使ったチャット実装チュートリアル |
+| gRPC: Up and Running | Kasun Indrasiri | gRPC の包括的な解説書 |
+| gRPC Go Course | Clement Jean | Udemy の gRPC Go コース |
 
 ### ツール
 
 | ツール | 用途 |
 |--------|------|
-| wscat | WebSocket のコマンドラインクライアント |
-| Redis CLI | Redis の操作と確認 |
-| Redis Insight | Redis の GUI 管理ツール |
-| k6 / vegeta | WebSocket の負荷テスト |
-| Docker Compose | マルチインスタンスのローカル実行 |
+| grpcurl | gRPC API のコマンドラインテスト |
+| grpcui | gRPC の Web UI テストツール |
+| Buf CLI | proto ファイルの管理・lint・コード生成 |
+| Evans | インタラクティブ gRPC クライアント |
 
 ---
 
 ## 前のフェーズ
 
-[Phase 2: gRPC + マルチサービス](./phase-2.md)
+[Phase 2: 認証・認可 (自前 JWT + bcrypt)](./phase-2.md)
 
 ## 次のフェーズ
 
-Phase 3 が完了したら Phase 4: Docker + コンテナ化 に進む。
+Phase 3 が完了したら [Phase 4: リアルタイム通信](./phase-4.md) に進む。
