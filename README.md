@@ -1,21 +1,24 @@
 # Go Microservices Chat
 
-リアルタイムチャットプラットフォームを **Go + AWS + Kubernetes** で構築するマイクロサービス学習プロジェクト。
+リアルタイムチャットプラットフォームを **Go + gRPC + Docker Compose** で構築するマイクロサービス学習プロジェクト。
 
 ## プロジェクトの目的
 
-モノレポ構成のマイクロサービスアーキテクチャにおけるベストプラクティスを、実際に動くチャットアプリケーションを通じて学ぶ。
+1. **マイクロサービスアーキテクチャを学ぶ** — モノレポ構成でのサービス分割、サービス間通信 (gRPC / WebSocket / Pub/Sub)、疎結合、API Gateway の役割を、実際に動くチャットアプリケーションを通じて理解する
+2. **chat サービスを通じて Go の書き方・概念・フローを学ぶ** — 層構造 (Handler / Service / Repository)、依存性注入、`context.Context`、goroutine/channel、interface 設計など、Go バックエンドのイディオムを手を動かしながら習得する
+
+**制約**: クラウド費用をかけずローカル (Docker Compose) で完結する。AWS/Kubernetes/Terraform は使わない。
 
 ## 想定規模
 
 | 項目 | 想定値 |
 |------|--------|
-| 同時接続ユーザー数 | 〜1,000 人 |
-| 総ユーザー数 | 〜10,000 人 |
-| チャットルーム数 | 〜500 |
-| メッセージ量 | 〜10,000 件/日 |
+| 同時接続ユーザー数 | 〜100 人 |
+| 総ユーザー数 | 〜1,000 人 |
+| チャットルーム数 | 〜100 |
+| メッセージ量 | 〜1,000 件/日 |
 
-> 学習プロジェクトのため実トラフィックはないが、上記規模を想定して設計・実装する。
+> 学習プロジェクトのため実トラフィックはない。ローカル Docker Compose で動く規模を想定する。
 
 ## 主な設計判断
 
@@ -25,13 +28,14 @@
 | クライアント向け API | **REST** (gRPC ではなく) | ブラウザからの利用が前提。gRPC はブラウザ互換性に制約がある |
 | リアルタイム配信（サービス間） | **gRPC Server Streaming** (Redis Pub/Sub 統一ではなく) | chat-service が Redis に依存するのを避け、サービス間の疎結合を維持する（データストアを他サービスから直接触らないマイクロサービスの原則） |
 | リアルタイム配信（クライアント向け） | **WebSocket** (SSE ではなく) | 双方向通信が必要（メッセージ送信 + 受信）。SSE はサーバー→クライアントの片方向のみ |
-| インスタンス間同期 | **Redis Pub/Sub** | realtime-service の複数インスタンス間でメッセージを同期。Kafka は本規模では過剰 |
+| 配信責務の分離 | **Redis Pub/Sub** | realtime-service 内で「受信」と「配信」を分離。1 インスタンス構成でも Pub/Sub を経由させ、N インスタンスに拡張しても同じコードで動く設計にする。Kafka は本規模では過剰 |
+| データストア | **PostgreSQL** 統一 (DynamoDB ではなく) | 学習の焦点をマイクロサービス設計に絞る。NoSQL は対象外 |
+| 認証 | **自前 JWT + bcrypt** (Cognito ではなく) | JWT の仕組み・トークン設計・パスワードハッシュを自分で実装して理解する |
 | Proto 管理 | **Buf CLI** (protoc ではなく) | lint/generate/依存管理を統一的に扱える。protoc の複雑なプラグイン管理が不要 |
 | DB ドライバー | **pgx v5** (database/sql ではなく) | PostgreSQL ネイティブ。接続プーリング (pgxpool) が標準搭載 |
 | HTTP ルーター | **Chi v5** (Gin, Echo ではなく) | net/http 互換。標準ライブラリに近い設計で Go の慣習に沿う |
 | ログ | **log/slog** (zap, zerolog ではなく) | Go 1.21 から標準ライブラリに含まれる。外部依存なしで構造化ログが書ける |
-| コンテナオーケストレーション | **Kubernetes** (ECS ではなく) | サービスごとの独立デプロイ・スケーリング・ヘルスチェックをマニフェストで宣言的に管理。マイクロサービスの運用標準 |
-| IaC | **Terraform** (CloudFormation ではなく) | AWS 以外にも対応可能。宣言的なインフラ管理のデファクトスタンダード |
+| 実行環境 | **Docker Compose** (Kubernetes ではなく) | ローカル完結、無料、再現性高い。本プロジェクトは K8s を対象外とする |
 
 ## アーキテクチャ
 
@@ -42,27 +46,24 @@ graph TD
 
     GW -->|gRPC| US["User Service<br/>:50051 / :8001"]
     GW -->|gRPC| CS["Chat Service<br/>:50052"]
-    GW -->|gRPC| NS["Notification Service<br/>:50053"]
-    GW -->|gRPC| MS["Media Service<br/>:50054"]
-    GW -->|WebSocket| RS["Realtime Service<br/>:50055 / :8081"]
+    GW -->|WebSocket| RS["Realtime Service<br/>:8081"]
 
-    US --> PG1[("PostgreSQL")]
-    CS --> DDB1[("DynamoDB")]
-    NS --> DDB2[("DynamoDB")]
-    MS --> S3[("S3")]
-    RS --> Redis[("Redis")]
+    RS -->|gRPC Server Streaming| CS
+    RS -->|gRPC Unary| CS
+
+    US --> PG1[("PostgreSQL<br/>userdb")]
+    CS --> PG2[("PostgreSQL<br/>chatdb")]
+    RS --> Redis[("Redis<br/>Pub/Sub")]
 ```
 
 ## サービス一覧
 
 | サービス | 役割 | プロトコル | データストア |
 |---------|------|-----------|------------|
-| **user-service** | ユーザー管理・フレンド機能 | REST + gRPC | PostgreSQL |
-| **chat-service** | チャットルーム・メッセージ管理 | gRPC | DynamoDB |
+| **user-service** | ユーザー管理・フレンド機能・認証 | REST + gRPC | PostgreSQL |
+| **chat-service** | チャットルーム・メッセージ管理 | gRPC | PostgreSQL |
 | **realtime-service** | WebSocket 接続・リアルタイム配信 | WebSocket + gRPC Server Streaming | Redis |
-| **notification-service** | 通知管理・プッシュ配信 | gRPC | DynamoDB |
-| **media-service** | ファイルアップロード・画像処理 | REST + gRPC | S3 |
-| **api-gateway** | 認証・ルーティング・レート制限 | REST → gRPC 変換 | - |
+| **api-gateway** | JWT 検証・ルーティング・REST→gRPC 変換 | REST → gRPC 変換 | - |
 
 ## 技術スタック
 
@@ -71,13 +72,12 @@ graph TD
 | 言語 | Go 1.22 |
 | HTTP ルーター | Chi v5 |
 | RPC | gRPC + Protocol Buffers (Buf CLI) |
-| DB ドライバー | pgx v5 |
+| DB ドライバー | pgx v5 (PostgreSQL) |
 | ログ | log/slog |
-| コンテナ | Docker / Kubernetes |
-| IaC | Terraform |
-| CI/CD | GitHub Actions |
-| 認証 | Amazon Cognito |
-| メッセージング | Amazon SQS / SNS |
+| コンテナ | Docker / Docker Compose |
+| 認証 | 自前 JWT (golang-jwt/jwt) + bcrypt |
+| キャッシュ/Pub/Sub | Redis (go-redis) |
+| WebSocket | gorilla/websocket |
 
 ## プロジェクト構成
 
@@ -90,7 +90,7 @@ go-microservices-chat/
 ├── gen/go/             # protobuf 生成コード
 ├── pkg/                # 共有パッケージ (errors, logger, middleware)
 ├── docs/               # 設計ドキュメント
-├── docker-compose.yml  # ローカル開発用 DB
+├── docker-compose.yml  # ローカル開発用 (PostgreSQL / Redis)
 └── go.work             # Go Workspace
 ```
 
@@ -120,7 +120,7 @@ go run ./services/user-service/cmd/server
 ### テスト
 
 ```bash
-# user-service のテスト (DB 不要)
+# user-service のテスト (DB 不要 - unit テスト)
 go test ./services/user-service/...
 ```
 
@@ -135,11 +135,11 @@ cd proto && buf generate
 | Phase | 内容 | 状態 |
 |-------|------|------|
 | 1 | Go 基礎 - REST API (user-service + PostgreSQL) | **完了** |
-| 2 | gRPC + サービス間通信 | Step 1 完了 (Proto 定義) |
-| 3 | Kubernetes デプロイ | - |
-| 4 | AWS サービス統合 (DynamoDB, SQS, S3) | - |
-| 5 | 可観測性 + CI/CD | - |
-| 6 | 本番運用 + セキュリティ | - |
+| 2 | 認証・認可 (自前 JWT + bcrypt) | - |
+| 3 | gRPC + マルチサービス + API Gateway | Proto 定義のみ完了 |
+| 4 | リアルタイム通信 (WebSocket + gRPC Server Streaming + Redis Pub/Sub) | - |
+
+> Phase 3 の Proto 定義 (`proto/user/v1/user.proto`) は先行して作成済み。Phase 2 の認証実装を終えてから Phase 3 で gRPC サーバー/クライアントを実装する。
 
 ## ドキュメント
 
@@ -147,6 +147,3 @@ cd proto && buf generate
 - [API 設計](docs/architecture/api-design.md)
 - [データモデル](docs/architecture/data-model.md)
 - [ディレクトリ構成](docs/architecture/directory-structure.md)
-- [AWS サービス構成](docs/aws/services.md)
-- [Kubernetes アーキテクチャ](docs/kubernetes/architecture.md)
-- [Terraform 構成](docs/terraform/structure.md)
