@@ -6,7 +6,7 @@
 
 | サービス | 用途 | 選定理由 |
 |---------|------|---------|
-| **Amazon EKS** | Kubernetes クラスター | マネージド K8s、CKA/CKAD 学習に最適 |
+| **Amazon EKS** | Kubernetes クラスター | マネージド K8s、運用負荷の軽減 |
 | **Amazon ECR** | コンテナレジストリ | EKS との統合がシームレス |
 
 ### データベース
@@ -97,48 +97,6 @@ graph TD
 
 ---
 
-## AWS SAA-C03 試験ドメインとの対応
-
-### ドメイン 1: セキュアなアーキテクチャの設計 (30%)
-
-| 試験トピック | プロジェクトでの実践 |
-|-------------|-------------------|
-| IAM ポリシー・ロール設計 | EKS Pod の IRSA（IAM Roles for Service Accounts） |
-| VPC セキュリティ（SG, NACL） | Private Subnet に DB 配置、Public Subnet に ALB |
-| データ暗号化（at rest / in transit） | RDS 暗号化、S3 SSE、TLS 通信 |
-| AWS Secrets Manager | DB パスワード、API キーの管理 |
-| Cognito 認証 | JWT ベースの API 認証 |
-
-### ドメイン 2: レジリエントなアーキテクチャの設計 (26%)
-
-| 試験トピック | プロジェクトでの実践 |
-|-------------|-------------------|
-| マルチ AZ 配置 | RDS Multi-AZ、EKS ノードの AZ 分散 |
-| Auto Scaling | EKS Cluster Autoscaler + HPA |
-| SQS/SNS による疎結合 | サービス間の非同期メッセージング |
-| デッドレターキュー | SQS DLQ によるエラーハンドリング |
-| ヘルスチェック | ALB + K8s Liveness/Readiness Probe |
-
-### ドメイン 3: 高パフォーマンスなアーキテクチャの設計 (24%)
-
-| 試験トピック | プロジェクトでの実践 |
-|-------------|-------------------|
-| ElastiCache によるキャッシュ | Redis によるプレゼンスキャッシュ |
-| DynamoDB の読み書きスループット | パーティションキー設計、GSI |
-| S3 のパフォーマンス最適化 | プレフィックス設計、Presigned URL |
-| CloudFront | 静的コンテンツ配信（将来拡張） |
-
-### ドメイン 4: コスト最適化されたアーキテクチャの設計 (20%)
-
-| 試験トピック | プロジェクトでの実践 |
-|-------------|-------------------|
-| 適切なインスタンスサイズ | EKS ノードのライトサイジング |
-| DynamoDB のキャパシティモード | On-Demand vs Provisioned の使い分け |
-| S3 ストレージクラス | ライフサイクルポリシー |
-| Terraform による環境管理 | dev は最小構成、prod は冗長構成 |
-
----
-
 ## コスト管理のヒント
 
 ### 開発環境でのコスト削減
@@ -161,6 +119,5 @@ graph TD
 
 ## 関連ドキュメント
 
-- [アーキテクチャ概要](../architecture/overview.md)
 - [DynamoDB 設計詳細](./dynamodb-design.md)
 - [Terraform 構成](../terraform/structure.md)

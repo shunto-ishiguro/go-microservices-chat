@@ -296,6 +296,5 @@ use (
 
 ## 関連ドキュメント
 
-- [アーキテクチャ概要](./overview.md)
 - [Terraform 構成詳細](../terraform/structure.md)
 - [Kubernetes アーキテクチャ](../kubernetes/architecture.md)

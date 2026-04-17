@@ -24,7 +24,6 @@ graph TD
 - サービス数が 6 個と少なく、Namespace 分離のメリットが小さい
 - サービス間通信が頻繁であり、同一 Namespace 内の方が DNS 名がシンプル
 - NetworkPolicy で十分なアクセス制御が可能
-- CKA/CKAD の学習では NetworkPolicy の方が重要
 
 ---
 
@@ -452,32 +451,7 @@ metadata:
 | media-service | S3 (ファイル), SQS/SNS (イベント) |
 | api-gateway | Cognito (トークン検証) |
 
----
-
-## CKA/CKAD 試験対応マッピング
-
-### CKA で学べるトピック
-
-| 試験トピック | プロジェクトでの実践 |
-|-------------|-------------------|
-| クラスターアーキテクチャ | EKS のコントロールプレーン・ワーカーノード理解 |
-| ワークロードスケジューリング | topologySpreadConstraints, nodeAffinity |
-| サービスとネットワーキング | ClusterIP, Ingress, NetworkPolicy |
-| ストレージ | PV/PVC（ログ永続化、将来拡張） |
-| トラブルシューティング | kubectl debug, logs, describe, events |
-
-### CKAD で学べるトピック
-
-| 試験トピック | プロジェクトでの実践 |
-|-------------|-------------------|
-| アプリケーション設計とビルド | マルチコンテナ Pod、Init Container |
-| アプリケーションのデプロイ | Deployment, Rolling Update 戦略 |
-| アプリケーションの可観測性 | Probe (Liveness/Readiness/Startup), ログ |
-| アプリケーション環境 | ConfigMap, Secret, ServiceAccount |
-| サービスとネットワーキング | Service, Ingress, NetworkPolicy |
-
 ## 関連ドキュメント
 
-- [アーキテクチャ概要](../architecture/overview.md)
 - [ディレクトリ構成](../architecture/directory-structure.md)
 - [Terraform 構成](../terraform/structure.md)

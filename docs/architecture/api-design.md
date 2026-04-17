@@ -398,9 +398,6 @@ service RealtimeService {
 
   // プレゼンス管理
   rpc UpdatePresence(UpdatePresenceRequest) returns (UpdatePresenceResponse);
-
-  // タイピングインジケーター
-  rpc SendTyping(SendTypingRequest) returns (SendTypingResponse);
 }
 
 message SubscribeRequest {
@@ -415,9 +412,8 @@ enum EventType {
   EVENT_TYPE_MESSAGE_DELETED = 3;
   EVENT_TYPE_USER_JOINED = 4;
   EVENT_TYPE_USER_LEFT = 5;
-  EVENT_TYPE_TYPING = 6;
-  EVENT_TYPE_PRESENCE_CHANGED = 7;
-  EVENT_TYPE_READ_RECEIPT = 8;
+  EVENT_TYPE_PRESENCE_CHANGED = 6;
+  EVENT_TYPE_READ_RECEIPT = 7;
 }
 
 message RealtimeEvent {
@@ -434,13 +430,6 @@ message UpdatePresenceRequest {
 }
 
 message UpdatePresenceResponse {}
-
-message SendTypingRequest {
-  string user_id = 1;
-  string room_id = 2;
-}
-
-message SendTypingResponse {}
 ```
 
 ### Notification Service (proto/notification/v1/notification.proto)
@@ -604,14 +593,6 @@ WSS /ws?token=<JWT>
   }
 }
 
-// タイピング開始
-{
-  "type": "typing",
-  "data": {
-    "room_id": "room_abc"
-  }
-}
-
 // 既読送信
 {
   "type": "read",
@@ -640,15 +621,6 @@ WSS /ws?token=<JWT>
     "content": "Hello!",
     "message_type": "text",
     "created_at": "2024-01-15T10:30:00Z"
-  }
-}
-
-// タイピング通知
-{
-  "type": "typing",
-  "data": {
-    "room_id": "room_abc",
-    "user_id": "user_789"
   }
 }
 
@@ -708,6 +680,5 @@ WSS /ws?token=<JWT>
 
 ## 関連ドキュメント
 
-- [アーキテクチャ概要](./overview.md)
 - [マイクロサービス詳細](./microservices.md)
 - [データモデル設計](./data-model.md)

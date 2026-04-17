@@ -1,8 +1,5 @@
 # Phase 5: コンテナ化 + Kubernetes (Docker, EKS, Kustomize)
 
-> **期間目安**: 約6-8週間
-> **難易度**: ★★★★★（中級〜上級）
-
 ---
 
 ## 学習目標
@@ -1095,7 +1092,7 @@ graph TD
 |----------|------|------|
 | Kubernetes Up & Running | Brendan Burns 他 | Kubernetes の定番入門書 |
 | Kubernetes in Action | Marko Lukša | 実践的な Kubernetes 解説書 |
-| CKA/CKAD Study Guide | Benjamin Muschko | CKA/CKAD 試験対策書 |
+| CKA/CKAD Study Guide | Benjamin Muschko | Kubernetes の実践的な学習ガイド |
 | Docker Deep Dive | Nigel Poulton | Docker の包括的な解説書 |
 
 ### ツール
@@ -1109,60 +1106,6 @@ graph TD
 | Lens | Kubernetes の GUI 管理ツール |
 | kubectx / kubens | コンテキスト/Namespace の切り替え |
 | stern | 複数 Pod のログ集約表示 |
-
----
-
-## 認定試験との関連
-
-Phase 5 は **CKA (Certified Kubernetes Administrator)** と **CKAD (Certified Kubernetes Application Developer)** の試験範囲に直結する。また、AWS SAA-C03 の EKS 関連トピックもカバーする。
-
-### CKA 試験との対応
-
-| CKA 試験ドメイン | 配点 | Phase 5 の対応トピック |
-|-----------------|------|----------------------|
-| **ストレージ (10%)** | 10% | PersistentVolume, PersistentVolumeClaim（EBS CSI Driver） |
-| **トラブルシューティング (30%)** | 30% | kubectl logs, describe, exec によるデバッグ、Probe の失敗調査 |
-| **ワークロードとスケジューリング (15%)** | 15% | Deployment, HPA, Resource Requests/Limits, Pod スケジューリング |
-| **クラスターアーキテクチャ (25%)** | 25% | Control Plane / Node コンポーネント、etcd, RBAC |
-| **サービスとネットワーキング (20%)** | 20% | Service, Ingress, NetworkPolicy, DNS |
-
-### CKAD 試験との対応
-
-| CKAD 試験ドメイン | 配点 | Phase 5 の対応トピック |
-|------------------|------|----------------------|
-| **アプリケーション設計とビルド (20%)** | 20% | Docker マルチステージビルド、CronJob、マルチコンテナ Pod |
-| **アプリケーションのデプロイ (20%)** | 20% | Deployment 戦略、Kustomize、ローリングアップデート |
-| **アプリケーションの可観測性とメンテナンス (15%)** | 15% | Probe (Liveness, Readiness, Startup)、ログ、リソースモニタリング |
-| **アプリケーション環境、設定、セキュリティ (25%)** | 25% | ConfigMap, Secret, ServiceAccount, SecurityContext, NetworkPolicy |
-| **サービスとネットワーキング (20%)** | 20% | Service, Ingress, NetworkPolicy |
-
-### AWS SAA-C03 との対応
-
-| Phase 5 トピック | SAA-C03 試験での出題ポイント |
-|-----------------|---------------------------|
-| EKS | コンテナワークロードの実行基盤の選択（EKS vs ECS vs Fargate） |
-| ECR | コンテナイメージの管理、ライフサイクルポリシー |
-| ALB | Application Load Balancer の設計、ターゲットグループ |
-| IRSA | Pod レベルの IAM 権限管理 |
-| VPC | EKS クラスターのネットワーク設計（サブネット、セキュリティグループ） |
-
-### 具体的な試験トピック対応表
-
-| Phase 5 ステップ | CKA | CKAD | SAA-C03 |
-|-----------------|-----|------|---------|
-| ステップ 1: Docker | - | アプリケーション設計 | - |
-| ステップ 3-4: K8s 基礎/kubectl | クラスターアーキテクチャ | - | - |
-| ステップ 5: マニフェスト作成 | ワークロード | アプリケーションデプロイ | - |
-| ステップ 6: Probe 設計 | トラブルシューティング | 可観測性 | - |
-| ステップ 7: HPA | ワークロード | - | - |
-| ステップ 8: NetworkPolicy | ネットワーキング | セキュリティ | - |
-| ステップ 9: Kustomize | - | デプロイ | - |
-| ステップ 10: EKS | - | - | コンテナサービス |
-| ステップ 11: IRSA | - | セキュリティ | IAM |
-| ステップ 12: Ingress (ALB) | ネットワーキング | ネットワーキング | ALB |
-| ステップ 13: PDB | ワークロード | - | - |
-
-> **注**: Phase 5 は CKA/CKAD の試験範囲の約70-80% をカバーする。残りの範囲（RBAC の詳細、etcd のバックアップ、クラスターのアップグレードなど）は別途試験対策として補完する必要がある。
 
 ---
 
