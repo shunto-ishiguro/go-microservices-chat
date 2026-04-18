@@ -11,7 +11,39 @@
 
 ---
 
+## クライアントから見たトランスポート
+
+ブラウザ等のクライアントは **REST と WebSocket の 2 つの入口** を使い分ける。決め方のルールは以下:
+
+| 性質 | 使うトランスポート |
+|------|-------------------|
+| 参照・一覧 (ルーム一覧、ルーム検索、メッセージ履歴 等) | **REST** |
+| リソース管理 (ルーム作成、メンバー追加・削除、プロフィール更新 等) | **REST** |
+| 認証 (login / register / refresh / logout) | **REST** |
+| **リアルタイム送信** (メッセージ送信、タイピング等) | **WebSocket** |
+| **リアルタイム受信** (新着メッセージ 等の push) | **WebSocket** |
+
+### アクション別マトリクス
+
+| クライアント操作 | 入口 | 内部経路 |
+|-----------------|------|---------|
+| サインアップ / ログイン / ログアウト | REST | Envoy → user-service (gRPC `Register`/`Login`/`Logout`) |
+| 自分のプロフィール取得・更新 | REST | Envoy → user-service (gRPC `GetUser`/`UpdateUser`) |
+| 公開ルームの検索 | REST | Envoy → chat-service (gRPC `SearchRooms`) |
+| 自分の参加ルーム一覧 | REST | Envoy → chat-service (gRPC `ListRooms`) |
+| ルーム作成 / 詳細取得 | REST | Envoy → chat-service (gRPC `CreateRoom`/`GetRoom`) |
+| ルーム参加 / 退出 | REST | Envoy → chat-service (gRPC `JoinRoom`/`LeaveRoom`) |
+| メッセージ履歴取得 | REST | Envoy → chat-service (gRPC `GetMessages`) |
+| **メッセージ送信** | **WebSocket** | realtime-service → chat-service (gRPC `SendMessage`) + Redis PUBLISH |
+| 新着メッセージの受信 | **WebSocket (push)** | Redis SUBSCRIBE → realtime-service → WebSocket |
+
+> **なぜ送信は WebSocket なのか**: REST (POST /messages) も技術的には可能だが、**すでに張ってある WebSocket** に相乗りする方が低遅延・省リソース。さらに、realtime-service が受信 → 即座に Redis にも PUBLISH できるので配信遅延を最小化できる。
+
+---
+
 ## REST API（Phase 4 以降、Envoy Gateway が gRPC-JSON Transcoder で自動公開）
+
+> このセクションに載っているのは **REST で公開されるエンドポイントのみ**。メッセージ送信はここには出てこない (WebSocket の [WebSocket メッセージフォーマット](#websocket-メッセージフォーマット) 参照)。
 
 ### 認証
 
@@ -24,39 +56,26 @@
 | POST | `/api/v1/auth/register` | ユーザー登録 | 不要 |
 | POST | `/api/v1/auth/login` | ログイン | 不要 |
 | POST | `/api/v1/auth/refresh` | トークンリフレッシュ | 不要 |
+| POST | `/api/v1/auth/logout` | リフレッシュトークン失効 | 必要 |
 | GET | `/api/v1/users/me` | 自分のプロフィール取得 | 必要 |
 | PUT | `/api/v1/users/me` | プロフィール更新 | 必要 |
-| GET | `/api/v1/users/:id` | ユーザー情報取得 | 必要 |
-| GET | `/api/v1/users/search?q=` | ユーザー検索 | 必要 |
-| GET | `/api/v1/friends` | フレンド一覧 | 必要 |
-| POST | `/api/v1/friends/request` | フレンド申請 | 必要 |
-| PUT | `/api/v1/friends/:id/accept` | フレンド承認 | 必要 |
-| DELETE | `/api/v1/friends/:id` | フレンド解除 | 必要 |
+| GET | `/api/v1/users/:id` | ユーザー情報取得 (ルームメンバー表示等) | 必要 |
 
 ### Chat Service エンドポイント
 
 | メソッド | パス | 説明 | 認証 |
 |---------|------|------|------|
 | POST | `/api/v1/rooms` | ルーム作成 | 必要 |
-| GET | `/api/v1/rooms` | 参加ルーム一覧 | 必要 |
+| GET | `/api/v1/rooms` | 自分が参加しているルーム一覧 | 必要 |
+| GET | `/api/v1/rooms/search?q=` | 公開ルーム検索 | 必要 |
 | GET | `/api/v1/rooms/:id` | ルーム詳細 | 必要 |
-| PUT | `/api/v1/rooms/:id` | ルーム情報更新 | 必要 |
-| POST | `/api/v1/rooms/:id/members` | メンバー追加 | 必要 |
-| DELETE | `/api/v1/rooms/:id/members/:userId` | メンバー削除 | 必要 |
-| GET | `/api/v1/rooms/:id/messages` | メッセージ一覧 | 必要 |
-| POST | `/api/v1/rooms/:id/messages` | メッセージ送信 | 必要 |
-| PUT | `/api/v1/rooms/:id/messages/:msgId` | メッセージ編集 | 必要 |
-| DELETE | `/api/v1/rooms/:id/messages/:msgId` | メッセージ削除 | 必要 |
-| POST | `/api/v1/rooms/:id/read` | 既読を送信 | 必要 |
+| POST | `/api/v1/rooms/:id/join` | ルームに自己参加 | 必要 |
+| DELETE | `/api/v1/rooms/:id/members/me` | ルームから自己退出 | 必要 |
+| GET | `/api/v1/rooms/:id/messages` | メッセージ履歴取得 (メンバーのみ、ページネーション) | 必要 |
 
-### Auth エンドポイント (Phase 1で追加)
+> **メッセージ送信は REST では公開しない**。クライアントは WebSocket で `send_message` を送る (後述)。
 
-| メソッド | パス | 説明 | 認証 |
-|---------|------|------|------|
-| POST | `/api/v1/auth/register` | ユーザー登録 | 不要 |
-| POST | `/api/v1/auth/login` | ログイン (JWT ペア発行) | 不要 |
-| POST | `/api/v1/auth/refresh` | リフレッシュトークンでアクセストークン再発行 | 不要 |
-| POST | `/api/v1/auth/logout` | リフレッシュトークン失効 | 必要 |
+> **全ルームは public**。誰でも検索・参加できる。招待・追放・プライベートルーム機能は持たない。
 
 ### 共通レスポンスフォーマット
 
@@ -120,6 +139,8 @@
 
 **Phase 1 から user-service はこの gRPC 定義で実装** する。Phase 1〜3 の間は `grpcurl` で直接叩いて動作確認し、Phase 4 で Envoy Gateway が REST に変換して公開する。
 
+> **ここの RPC 全てが REST で公開されるわけではない**。`chat.v1.SendMessage` は **REST には公開しない** (`google.api.http` アノテーションを付けない)。クライアント → WebSocket → realtime-service → chat-service の経路で **内部 gRPC として呼ばれる** だけ。
+
 
 
 ### User Service (proto/user/v1/user.proto)
@@ -131,19 +152,15 @@ package user.v1;
 import "google/protobuf/timestamp.proto";
 
 service UserService {
-  // ユーザー管理
-  rpc CreateUser(CreateUserRequest) returns (CreateUserResponse);
+  // 認証
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Login(LoginRequest) returns (LoginResponse);
+  rpc Refresh(RefreshRequest) returns (RefreshResponse);
+  rpc Logout(LogoutRequest) returns (LogoutResponse);
+
+  // プロフィール
   rpc GetUser(GetUserRequest) returns (GetUserResponse);
   rpc UpdateUser(UpdateUserRequest) returns (UpdateUserResponse);
-  rpc SearchUsers(SearchUsersRequest) returns (SearchUsersResponse);
-
-  // フレンド管理
-  rpc ListFriends(ListFriendsRequest) returns (ListFriendsResponse);
-  rpc SendFriendRequest(SendFriendRequestReq) returns (SendFriendRequestResp);
-  rpc AcceptFriendRequest(AcceptFriendRequestReq) returns (AcceptFriendRequestResp);
-
-  // プレゼンス
-  rpc GetUserPresence(GetUserPresenceRequest) returns (GetUserPresenceResponse);
 }
 
 message User {
@@ -153,21 +170,45 @@ message User {
   string display_name = 4;
   string avatar_url = 5;
   string status_text = 6;
-  bool is_online = 7;
-  google.protobuf.Timestamp created_at = 8;
-  google.protobuf.Timestamp updated_at = 9;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
 }
 
-message CreateUserRequest {
+message RegisterRequest {
   string email = 1;
   string username = 2;
   string display_name = 3;
-  string password = 4;  // Phase 1で bcrypt 化して保管
+  string password = 4;
 }
 
-message CreateUserResponse {
+message RegisterResponse {
   User user = 1;
 }
+
+message LoginRequest {
+  string email = 1;
+  string password = 2;
+}
+
+message LoginResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+}
+
+message RefreshRequest {
+  string refresh_token = 1;
+}
+
+message RefreshResponse {
+  string access_token = 1;
+  string refresh_token = 2;
+}
+
+message LogoutRequest {
+  string refresh_token = 1;
+}
+
+message LogoutResponse {}
 
 message GetUserRequest {
   string user_id = 1;
@@ -187,47 +228,6 @@ message UpdateUserRequest {
 message UpdateUserResponse {
   User user = 1;
 }
-
-message SearchUsersRequest {
-  string query = 1;
-  int32 limit = 2;
-  string cursor = 3;
-}
-
-message SearchUsersResponse {
-  repeated User users = 1;
-  string next_cursor = 2;
-}
-
-message ListFriendsRequest {
-  string user_id = 1;
-}
-
-message ListFriendsResponse {
-  repeated User friends = 1;
-}
-
-message SendFriendRequestReq {
-  string user_id = 1;
-  string friend_id = 2;
-}
-
-message SendFriendRequestResp {}
-
-message AcceptFriendRequestReq {
-  string user_id = 1;
-  string friend_id = 2;
-}
-
-message AcceptFriendRequestResp {}
-
-message GetUserPresenceRequest {
-  repeated string user_ids = 1;
-}
-
-message GetUserPresenceResponse {
-  map<string, bool> presence = 1;
-}
 ```
 
 ### Chat Service (proto/chat/v1/chat.proto)
@@ -239,27 +239,19 @@ package chat.v1;
 import "google/protobuf/timestamp.proto";
 
 service ChatService {
-  // ルーム管理
+  // ルーム管理 (REST 公開)
   rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
   rpc GetRoom(GetRoomRequest) returns (GetRoomResponse);
-  rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse);
-  rpc AddMember(AddMemberRequest) returns (AddMemberResponse);
-  rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+  rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse);      // 自分の参加ルーム
+  rpc SearchRooms(SearchRoomsRequest) returns (SearchRoomsResponse); // 公開ルーム検索
+  rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse);
+  rpc LeaveRoom(LeaveRoomRequest) returns (LeaveRoomResponse);
 
-  // メッセージ管理
-  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+  // メッセージ履歴 (REST 公開)
   rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse);
-  rpc EditMessage(EditMessageRequest) returns (EditMessageResponse);
-  rpc DeleteMessage(DeleteMessageRequest) returns (DeleteMessageResponse);
 
-  // 既読管理
-  rpc MarkAsRead(MarkAsReadRequest) returns (MarkAsReadResponse);
-}
-
-enum RoomType {
-  ROOM_TYPE_UNSPECIFIED = 0;
-  ROOM_TYPE_DIRECT = 1;
-  ROOM_TYPE_GROUP = 2;
+  // 内部 RPC (REST 公開しない、realtime-service から呼ばれる)
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
 }
 
 enum MessageType {
@@ -272,16 +264,15 @@ enum MessageType {
 message Room {
   string id = 1;
   string name = 2;
-  RoomType type = 3;
-  string created_by = 4;
-  repeated RoomMember members = 5;
+  string created_by = 3;
+  int32 member_count = 4;
+  repeated RoomMember members = 5;  // GetRoom 時のみ含める
   google.protobuf.Timestamp created_at = 6;
 }
 
 message RoomMember {
   string user_id = 1;
-  string role = 2;
-  google.protobuf.Timestamp joined_at = 3;
+  google.protobuf.Timestamp joined_at = 2;
 }
 
 message Message {
@@ -292,15 +283,11 @@ message Message {
   MessageType message_type = 5;
   string media_url = 6;
   string parent_id = 7;
-  bool is_edited = 8;
-  google.protobuf.Timestamp created_at = 9;
-  google.protobuf.Timestamp updated_at = 10;
+  google.protobuf.Timestamp created_at = 8;
 }
 
 message CreateRoomRequest {
   string name = 1;
-  RoomType type = 2;
-  repeated string member_ids = 3;
 }
 
 message CreateRoomResponse {
@@ -316,9 +303,8 @@ message GetRoomResponse {
 }
 
 message ListRoomsRequest {
-  string user_id = 1;
-  int32 limit = 2;
-  string cursor = 3;
+  int32 limit = 1;
+  string cursor = 2;
 }
 
 message ListRoomsResponse {
@@ -326,19 +312,28 @@ message ListRoomsResponse {
   string next_cursor = 2;
 }
 
-message AddMemberRequest {
-  string room_id = 1;
-  string user_id = 2;
+message SearchRoomsRequest {
+  string query = 1;
+  int32 limit = 2;
+  string cursor = 3;
 }
 
-message AddMemberResponse {}
-
-message RemoveMemberRequest {
-  string room_id = 1;
-  string user_id = 2;
+message SearchRoomsResponse {
+  repeated Room rooms = 1;
+  string next_cursor = 2;
 }
 
-message RemoveMemberResponse {}
+message JoinRoomRequest {
+  string room_id = 1;
+}
+
+message JoinRoomResponse {}
+
+message LeaveRoomRequest {
+  string room_id = 1;
+}
+
+message LeaveRoomResponse {}
 
 message SendMessageRequest {
   string room_id = 1;
@@ -364,84 +359,31 @@ message GetMessagesResponse {
   string next_cursor = 2;
   bool has_more = 3;
 }
-
-message EditMessageRequest {
-  string message_id = 1;
-  string sender_id = 2;
-  string content = 3;
-}
-
-message EditMessageResponse {
-  Message message = 1;
-}
-
-message DeleteMessageRequest {
-  string message_id = 1;
-  string sender_id = 2;
-}
-
-message DeleteMessageResponse {}
-
-message MarkAsReadRequest {
-  string room_id = 1;
-  string user_id = 2;
-  string message_id = 3;
-}
-
-message MarkAsReadResponse {}
 ```
 
-### Realtime Service (proto/realtime/v1/realtime.proto)
+### Realtime Service
 
-```protobuf
-syntax = "proto3";
-package realtime.v1;
+realtime-service は **gRPC サーバーを公開しない**。外部との通信は WebSocket、内部との通信は以下のとおり。
 
-import "google/protobuf/timestamp.proto";
+| 通信 | 方向 | プロトコル | 用途 |
+|------|------|-----------|------|
+| クライアント ↔ realtime-service | 双方向 | WebSocket | チャットメッセージの送受信 |
+| realtime-service → chat-service | 片方向 | gRPC Unary (`SendMessage`) | 受信メッセージの永続化依頼 |
+| realtime-service ↔ Redis | 双方向 | `PUBLISH` / `PSUBSCRIBE` | プロセス間の配信バス |
 
-service RealtimeService {
-  // サーバーからクライアントへのイベントストリーム
-  rpc Subscribe(SubscribeRequest) returns (stream RealtimeEvent);
+リアルタイム配信の経路は gRPC ではなく **Redis Pub/Sub** に集約しているため、`proto/realtime/v1/realtime.proto` は存在しない (Phase 3 でも追加しない)。
 
-  // プレゼンス管理
-  rpc UpdatePresence(UpdatePresenceRequest) returns (UpdatePresenceResponse);
-}
-
-message SubscribeRequest {
-  string user_id = 1;
-  repeated string room_ids = 2;
-}
-
-enum EventType {
-  EVENT_TYPE_UNSPECIFIED = 0;
-  EVENT_TYPE_NEW_MESSAGE = 1;
-  EVENT_TYPE_MESSAGE_EDITED = 2;
-  EVENT_TYPE_MESSAGE_DELETED = 3;
-  EVENT_TYPE_USER_JOINED = 4;
-  EVENT_TYPE_USER_LEFT = 5;
-  EVENT_TYPE_PRESENCE_CHANGED = 6;
-  EVENT_TYPE_READ_RECEIPT = 7;
-}
-
-message RealtimeEvent {
-  EventType type = 1;
-  string room_id = 2;
-  string user_id = 3;
-  bytes payload = 4;
-  google.protobuf.Timestamp timestamp = 5;
-}
-
-message UpdatePresenceRequest {
-  string user_id = 1;
-  bool is_online = 2;
-}
-
-message UpdatePresenceResponse {}
-```
+WebSocket のメッセージ仕様は [WebSocket メッセージフォーマット](#websocket-メッセージフォーマット) 参照。
 
 ---
 
 ## WebSocket メッセージフォーマット
+
+ブラウザから **realtime-service** に張るリアルタイム通信路。メッセージ送信・受信はすべてこの経路で行う。
+
+- **通信相手**: クライアント ↔ realtime-service (`:8081`、Phase 4 では Envoy Gateway 経由)
+- **通信形式**: 接続は張りっぱなし。JSON メッセージを双方向に流す
+- **内部処理**: realtime-service が受信したメッセージを chat-service (永続化) と Redis (配信) に流す。詳細は [realtime-message-flow.md](../flow/realtime-message-flow.md) 参照
 
 ### 接続
 
@@ -478,15 +420,6 @@ WSS /ws?token=<JWT>
   }
 }
 
-// 既読送信
-{
-  "type": "read",
-  "data": {
-    "room_id": "room_abc",
-    "message_id": "msg_123"
-  }
-}
-
 // Ping (Keep-alive)
 {
   "type": "ping"
@@ -506,45 +439,6 @@ WSS /ws?token=<JWT>
     "content": "Hello!",
     "message_type": "text",
     "created_at": "2024-01-15T10:30:00Z"
-  }
-}
-
-// プレゼンス変更
-{
-  "type": "presence",
-  "data": {
-    "user_id": "user_789",
-    "is_online": true
-  }
-}
-
-// 既読通知
-{
-  "type": "read_receipt",
-  "data": {
-    "room_id": "room_abc",
-    "user_id": "user_789",
-    "message_id": "msg_123"
-  }
-}
-
-// メッセージ編集
-{
-  "type": "message_edited",
-  "data": {
-    "id": "msg_456",
-    "room_id": "room_abc",
-    "content": "Hello! (edited)",
-    "updated_at": "2024-01-15T10:35:00Z"
-  }
-}
-
-// メッセージ削除
-{
-  "type": "message_deleted",
-  "data": {
-    "id": "msg_456",
-    "room_id": "room_abc"
   }
 }
 

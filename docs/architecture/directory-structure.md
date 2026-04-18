@@ -25,13 +25,12 @@ go-microservices-chat/
 │   ├── buf.yaml
 │   ├── buf.gen.yaml
 │   ├── user/v1/user.proto           # (Phase 0 から先行あり)
-│   ├── chat/v1/chat.proto           # (Phase 2 で追加)
-│   └── realtime/v1/realtime.proto   # (Phase 3 で追加)
+│   └── chat/v1/chat.proto           # (Phase 2 で追加)
+│   # realtime-service は WebSocket + Redis Pub/Sub のみで、gRPC を公開しない → realtime.proto なし
 │
 ├── gen/go/                          # Buf 生成コード (Go モジュール)
 │   ├── user/v1/
-│   ├── chat/v1/
-│   └── realtime/v1/
+│   └── chat/v1/
 │
 ├── pkg/                             # 共有パッケージ
 │   ├── auth/                        # JWT 発行 (Phase 1)・JWKS 提供
@@ -104,18 +103,45 @@ services/user-service/
 │       ├── repository.go            # Repository interface + PostgreSQL 実装
 │       ├── grpc_server.go           # proto ↔ domain 変換 + RPC ハンドラ
 │       ├── auth.go                  # bcrypt / JWT 発行 (Phase 1)
-│       ├── friend.go                # フレンド管理 (Phase 1)
 │       └── *_test.go
 └── migrations/                      # SQL (K8s Job で実行)
     ├── 001_create_users.up.sql
     ├── 002_add_password_hash.up.sql
-    ├── 003_create_refresh_tokens.up.sql
-    └── 004_create_friendships.up.sql
+    └── 003_create_refresh_tokens.up.sql
 ```
+
+### 複数ドメインが同居するサービスのバリエーション (chat-service)
+
+chat-service は **1 つの gRPC サービス (`ChatService`) に Room と Message の RPC が両方含まれる** ため、トランスポート層を `internal/grpc/` に切り出して両ドメインを束ねる。
+
+```
+services/chat-service/
+├── cmd/server/main.go
+├── internal/
+│   ├── config/
+│   ├── room/                       # Room 集約 (rooms / room_members)
+│   │   ├── room.go
+│   │   ├── service.go              # Create/Get/List/Search/Join/Leave/EnsureMember
+│   │   ├── repository.go
+│   │   └── *_test.go
+│   ├── message/                    # Message 集約 (messages)
+│   │   ├── message.go
+│   │   ├── service.go              # Send/GetMessages
+│   │   ├── repository.go
+│   │   └── *_test.go
+│   └── grpc/                       # ★ ChatServiceServer を一本化
+│       └── server.go               # proto↔domain 変換 + 横断認可
+└── migrations/
+```
+
+**ルール**:
+
+- 1 つのドメインに閉じる RPC は、そのドメインパッケージに `grpc_server.go` を置いてよい (user-service のパターン)
+- 1 つの gRPC サービスに**複数ドメインの RPC が同居** する場合のみ、`internal/grpc/` にまとめる (chat-service のパターン)
 
 ### 垂直分割を採用する理由
 
-| 観点 | 水平分割 (`handler/service/repository/`) | 垂直分割 (`user/`, `friend/`) |
+| 観点 | 水平分割 (`handler/service/repository/`) | 垂直分割 (`user/`, `room/`) |
 |------|-----------------------------------------|-------------------------------|
 | 1 機能の変更範囲 | 3 フォルダに散らばる | 1 パッケージに閉じる |
 | 呼び出し側の読み心地 | `handler.UserHandler` (冗長) | `user.Server` (Go 標準ライブラリ風) |
@@ -127,9 +153,9 @@ services/user-service/
 | Phase | 追加されるパッケージ・ファイル | 備考 |
 |-------|----------------------|------|
 | 0 | `go.work` / `proto/buf.yaml` / `Makefile` / `gen/go/` | 骨組みのみ。`services/` `deploy/` は空 |
-| 1 | `services/user-service/internal/user/`, `pkg/auth/`, `pkg/interceptor/` | CRUD + 認証 + フレンドを垂直分割で集約 |
-| 2 | `services/chat-service/internal/room/`, `internal/message/`, `proto/chat/v1/` | チャットドメイン |
-| 3 | `services/realtime-service/internal/hub/`, `internal/ws/`, `internal/presence/` | WebSocket ハブ + 接続管理 |
+| 1 | `services/user-service/internal/user/`, `pkg/auth/`, `pkg/interceptor/` | 認証 + プロフィール管理を垂直分割で集約 |
+| 2 | `services/chat-service/internal/room/`, `internal/message/`, `internal/grpc/`, `proto/chat/v1/` | 2 つのドメイン + gRPC トランスポート束ね層 (下記補足) |
+| 3 | `services/realtime-service/internal/hub/`, `internal/pubsub/`, `internal/ws/` | WebSocket ハブ + Redis Pub/Sub + 接続管理 |
 | 4 | `deploy/` 配下の全 YAML | K8s マニフェスト + Envoy Gateway 設定 |
 
 ---

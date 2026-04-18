@@ -67,30 +67,42 @@
 
 | カテゴリ | RPC | 説明 |
 |---------|-----|------|
-| ルーム管理 | `CreateRoom` / `GetRoom` / `ListRooms` | 1:1・グループ |
-| メンバー | `AddMember` / `RemoveMember` | ルームへの出入り |
-| メッセージ | `SendMessage` / `GetMessages` / `EditMessage` / `DeleteMessage` | メッセージ CRUD |
-| 既読 | `MarkAsRead` | 既読マーカー |
+| ルーム管理 | `CreateRoom` / `GetRoom` / `ListRooms` / `SearchRooms` | 公開ルーム (作成・自分の一覧・詳細・検索) |
+| 参加管理 | `JoinRoom` / `LeaveRoom` | 本人が自己参加・自己退出 (招待・追放なし) |
+| メッセージ | `SendMessage` / `GetMessages` | メッセージ作成と履歴取得 (編集・削除はスコープ外) |
 
-- [ ] `google.api.http` アノテーションを書いておく (Phase 4 の REST 自動公開で使う)
+- [ ] `google.api.http` アノテーションは **REST 公開する RPC にのみ付ける** (Phase 4 の REST 自動公開で使う)
+- [ ] **`SendMessage` には付けない** (クライアントからは WebSocket 経由、内部的には realtime-service が呼び出すだけなので REST 公開不要)
 
 ```protobuf
 import "google/api/annotations.proto";
 
 service ChatService {
+  // REST 公開するもの: google.api.http を付ける
   rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse) {
-    option (google.api.http) = {
-      post: "/api/v1/rooms"
-      body: "*"
-    };
+    option (google.api.http) = {post: "/api/v1/rooms", body: "*"};
   }
-  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse) {
-    option (google.api.http) = {
-      post: "/api/v1/rooms/{room_id}/messages"
-      body: "*"
-    };
+  rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse) {
+    option (google.api.http) = {get: "/api/v1/rooms"};
   }
-  // ...
+  rpc SearchRooms(SearchRoomsRequest) returns (SearchRoomsResponse) {
+    option (google.api.http) = {get: "/api/v1/rooms/search"};
+  }
+  rpc GetRoom(GetRoomRequest) returns (GetRoomResponse) {
+    option (google.api.http) = {get: "/api/v1/rooms/{room_id}"};
+  }
+  rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse) {
+    option (google.api.http) = {post: "/api/v1/rooms/{room_id}/join", body: "*"};
+  }
+  rpc LeaveRoom(LeaveRoomRequest) returns (LeaveRoomResponse) {
+    option (google.api.http) = {delete: "/api/v1/rooms/{room_id}/members/me"};
+  }
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse) {
+    option (google.api.http) = {get: "/api/v1/rooms/{room_id}/messages"};
+  }
+
+  // REST 公開しないもの: google.api.http を付けない (WebSocket 経由で realtime-svc から呼ばれる)
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
 }
 ```
 
@@ -104,7 +116,7 @@ service ChatService {
 
 ### ステップ 2: ディレクトリ骨組みとモジュール
 
-user-service と同じパターン。
+user-service と同様に垂直分割するが、**chat-service は 1 つの gRPC サービス (`ChatService`) に Room と Message の RPC が同居** するため、gRPC トランスポート層は `internal/grpc/` に切り出して両ドメインを束ねる。
 
 ```
 services/chat-service/
@@ -112,21 +124,60 @@ services/chat-service/
 ├── go.mod
 ├── internal/
 │   ├── config/
-│   ├── room/
-│   │   ├── room.go
-│   │   ├── service.go
+│   ├── room/                     # Room 集約 (rooms + room_members)
+│   │   ├── room.go               # エンティティ (Room / RoomMember)
+│   │   ├── service.go            # Create/Get/List/Search/Join/Leave/EnsureMember
+│   │   ├── repository.go         # interface + PostgreSQL 実装
+│   │   └── *_test.go
+│   ├── message/                  # Message 集約 (messages)
+│   │   ├── message.go            # エンティティ
+│   │   ├── service.go            # Send/GetMessages
 │   │   ├── repository.go
-│   │   └── grpc_server.go
-│   └── message/
-│       ├── message.go
-│       ├── service.go
-│       ├── repository.go
-│       └── grpc_server.go
+│   │   └── *_test.go
+│   └── grpc/                     # gRPC トランスポート層 (両ドメインを束ねる)
+│       └── server.go             # ChatServiceServer を実装、proto↔domain 変換
 └── migrations/
     ├── 001_create_rooms.up.sql / down.sql
     ├── 002_create_room_members.up.sql / down.sql
     └── 003_create_messages.up.sql / down.sql
 ```
+
+### なぜ `grpc/` を別パッケージに切り出すか
+
+user-service は `internal/user/grpc_server.go` を同パッケージ内に置けた (`UserService` の RPC 全部が `user` ドメインに属すため)。
+
+chat-service は違う:
+- `ChatService` gRPC は **1 つのインターフェース** に `CreateRoom` / `SendMessage` / `JoinRoom` 等が全部含まれる
+- これを `room/grpc_server.go` と `message/grpc_server.go` に分割すると、**gRPC サーバー登録が 2 箇所に割れる** (インターフェース分割不可)
+- そこで `internal/grpc/server.go` に一本化し、`room.Service` と `message.Service` に委譲する構造にする
+
+```go
+// internal/grpc/server.go
+type Server struct {
+    chatv1.UnimplementedChatServiceServer
+    rooms    *room.Service
+    messages *message.Service
+}
+
+func (s *Server) CreateRoom(ctx context.Context, req *chatv1.CreateRoomRequest) (*chatv1.CreateRoomResponse, error) {
+    r, err := s.rooms.Create(ctx, req.GetName())
+    if err != nil { return nil, toGRPCError(err) }
+    return &chatv1.CreateRoomResponse{Room: toProto(r)}, nil
+}
+
+func (s *Server) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
+    senderID, _ := interceptor.UserIDFromContext(ctx)
+    // 認可: Room ↔ Message を横断する唯一の箇所
+    if err := s.rooms.EnsureMember(ctx, req.GetRoomId(), senderID); err != nil {
+        return nil, toGRPCError(err)
+    }
+    m, err := s.messages.Send(ctx, req.GetRoomId(), senderID, req.GetContent())
+    if err != nil { return nil, toGRPCError(err) }
+    return &chatv1.SendMessageResponse{Message: toProto(m)}, nil
+}
+```
+
+**ビジネスロジックは `room/` と `message/` に分割、トランスポート変換と横断認可は `grpc/` に集約** する定番パターン。
 
 - [ ] `services/chat-service/` を `go mod init`
 - [ ] `go.work` に `./services/chat-service` を追加
@@ -155,27 +206,25 @@ migrate -path services/chat-service/migrations \
 
 ### ステップ 4: Room / Message の Go 実装
 
-- [ ] Room ドメイン (`internal/room/`): `CreateRoom` / `GetRoom` / `ListRooms` / `AddMember` / `RemoveMember`
-- [ ] Message ドメイン (`internal/message/`): `SendMessage` / `GetMessages` / `EditMessage` / `DeleteMessage` / `MarkAsRead`
+- [ ] Room ドメイン (`internal/room/`): `CreateRoom` / `GetRoom` / `ListRooms` / `SearchRooms` / `JoinRoom` / `LeaveRoom`
+- [ ] Message ドメイン (`internal/message/`): `SendMessage` / `GetMessages`
 - [ ] Cursor-based ページネーション (メッセージ履歴用)
 - [ ] **`TrustedUserID` Interceptor を Phase 1 の `pkg/interceptor/` から import** (chat-service 側では一切書き直さない)
-- [ ] リソース所有者認可 (他人のメッセージを編集・削除できない)
+- [ ] リソース所有者認可 (他人の代わりにメッセージ送信できない等、`sender_id` と requester の一致確認)
 
 ```go
-func (s *MessageService) EditMessage(ctx context.Context, messageID string, content string) error {
+func (s *MessageService) SendMessage(ctx context.Context, p SendParams) (*Message, error) {
     requesterID, _ := interceptor.UserIDFromContext(ctx)
-    msg, err := s.repo.GetByID(ctx, messageID)
-    if err != nil {
-        return err
+    if p.SenderID != requesterID {
+        return nil, status.Error(codes.PermissionDenied, "cannot send as another user")
     }
-    if msg.SenderID != requesterID {
-        return status.Error(codes.PermissionDenied, "cannot edit other's message")
-    }
-    // ...
+    // 永続化...
 }
 ```
 
-**確認ポイント**: bufconn で Room / Message の CRUD シナリオが通る。
+> **スコープ外**: メッセージの編集 (EditMessage) と削除 (DeleteMessage) は Phase 2 のスコープから外した。リアルタイム同期の複雑度 (`message_edited` / `message_deleted` イベントの扱い) が学習主題から外れるため。将来の発展課題として残す。
+
+**確認ポイント**: bufconn で Room の CRUD と Message の Send / Get が通る。
 
 ---
 
@@ -183,35 +232,42 @@ func (s *MessageService) EditMessage(ctx context.Context, messageID string, cont
 
 ### ステップ 5: chat-service から user-service を呼ぶ
 
-chat-service から user-service の `GetUser` を呼び、ルームメンバー / メッセージ送信者の存在確認をする。
+`GetRoom` の応答で **メンバーの display_name 等を含めるため**、chat-service から user-service の `GetUser` を呼ぶ。これがサービス間 gRPC 通信の体験対象。
 
 - [ ] chat-service に user-service gRPC クライアントを組み込む
 - [ ] 起動時に `grpc.Dial` で長寿命接続を確立 (`localhost:50051`)
-- [ ] `CreateRoom` 時にメンバー ID の存在を `GetUser` で確認
-- [ ] `SendMessage` 時に送信者 ID の存在を確認
+- [ ] `GetRoom` 時に `room_members` の `user_id` 一覧を取り、**各メンバーの表示情報を user-service から取得**
 - [ ] **`x-user-id` を下流の呼び出しにも伝搬**:
 
 ```go
-func (s *RoomService) CreateRoom(ctx context.Context, p CreateRoomParams) (*Room, error) {
+func (s *RoomService) GetRoom(ctx context.Context, roomID string) (*Room, error) {
     requesterID, _ := interceptor.UserIDFromContext(ctx)
+
+    room, err := s.repo.GetByID(ctx, roomID)
+    if err != nil {
+        return nil, err
+    }
 
     // 下流 (user-service) に x-user-id を伝搬
     outCtx := metadata.AppendToOutgoingContext(ctx, "x-user-id", requesterID)
 
-    for _, uid := range p.MemberIDs {
-        _, err := s.users.GetUser(outCtx, &userv1.GetUserRequest{UserId: uid})
+    for i, m := range room.Members {
+        u, err := s.users.GetUser(outCtx, &userv1.GetUserRequest{UserId: m.UserID})
         if err != nil {
-            return nil, fmt.Errorf("invalid member %s: %w", uid, err)
+            // メンバーが見つからない等は表示だけ落とす (致命的エラーにしない)
+            continue
         }
+        room.Members[i].DisplayName = u.User.DisplayName
     }
-    // ルーム作成
+    return room, nil
 }
 ```
 
 - [ ] エラーハンドリング: user-service からの `codes.NotFound` をドメインエラーに変換
 - [ ] タイムアウト (`context.WithTimeout`)
+- [ ] N+1 問題の認識 (今は `GetUser` を N 回呼ぶ。将来 `GetUsers` の bulk API で解決する発展課題)
 
-**確認ポイント**: 2 プロセスを並走 (`go run user-service` と `go run chat-service`) し、`grpcurl` で chat-service の `CreateRoom` を叩くと、user-service の `GetUser` が呼ばれ、存在しない user_id で失敗する。
+**確認ポイント**: 2 プロセスを並走 (`go run user-service` と `go run chat-service`) し、`grpcurl` で chat-service の `GetRoom` を叩くと、user-service の `GetUser` が呼ばれてメンバーの display_name が埋まる。
 
 ---
 
@@ -272,7 +328,7 @@ Phase 2 完了時に以下が動作していること:
 - [ ] `chatdb` と `userdb` が論理分離されている
 - [ ] chat-service → user-service の gRPC 通信で存在確認が動作
 - [ ] `x-user-id` が chat-service から user-service まで伝搬
-- [ ] リソース所有者認可 (他人のメッセージ編集を拒否)
+- [ ] リソース所有者認可 (他人になりすましての送信を拒否)
 - [ ] 2 プロセス並走での統合シナリオが `grpcurl` で叩ける
 - [ ] `go test ./...` が PASS
 
@@ -315,15 +371,15 @@ sequenceDiagram
     participant DB1 as chatdb
     participant DB2 as userdb
 
-    Dev->>CS: CreateRoom (x-user-id=alice)
+    Dev->>CS: GetRoom (x-user-id=alice)
     CS->>CS: TrustedUserID → Context
-    loop for each member_id
+    CS->>DB1: SELECT rooms + room_members
+    loop for each member.user_id
       CS->>US: GetUser (metadata: x-user-id=alice)
       US->>DB2: SELECT users
-      US->>CS: GetUserResponse
+      US->>CS: GetUserResponse (display_name 等)
     end
-    CS->>DB1: INSERT rooms
-    CS->>Dev: CreateRoomResponse
+    CS->>Dev: GetRoomResponse (メンバー情報を enrich 済み)
 ```
 
 ---

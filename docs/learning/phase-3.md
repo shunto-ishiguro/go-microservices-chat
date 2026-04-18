@@ -1,19 +1,18 @@
-# Phase 3: realtime-service (WebSocket + gRPC Server Streaming + Redis Pub/Sub)
+# Phase 3: realtime-service (WebSocket + Redis Pub/Sub)
 
 ---
 
 ## 学習目標
 
-3 つ目のサービス (realtime-service) を **Go で完結** して実装する。WebSocket と gRPC Server Streaming を活用してリアルタイムチャットを実現し、Redis Pub/Sub で配信責務を分離する。
+3 つ目のサービス (realtime-service) を **Go で完結** して実装する。WebSocket と Redis Pub/Sub を組み合わせて **N インスタンス前提のリアルタイムチャット** を実現する。
 
-**K8s・Envoy は Phase 4 まで登場しない**。Phase 3 のゴールは「3 プロセス (user / chat / realtime) が localhost で連携し、ブラウザ から WebSocket でリアルタイム通信できる」まで。
+**K8s・Envoy は Phase 4 まで登場しない**。Phase 3 のゴールは「3 プロセス (user / chat / realtime) が localhost で連携し、ブラウザ から WebSocket でリアルタイム通信できる」まで。realtime-service は Phase 4 で 2+ Pod に並べることを前提に、**最初から Redis Pub/Sub で配信責務を分離** して実装する。
 
 | # | 目標 | 詳細 |
 |---|------|------|
 | 1 | WebSocket を理解し Go で実装できる | `gorilla/websocket`、Hub パターン |
-| 2 | gRPC Server Streaming を実装できる | chat-service → realtime-service のリアルタイム push |
-| 3 | Redis Pub/Sub を活用できる | 受信と配信の責務分離、N インスタンス拡張の土台 |
-| 4 | 3 プロセスでの統合を体験できる | user / chat / realtime を並行起動 |
+| 2 | Redis Pub/Sub を活用できる | 受信と配信の責務分離、N インスタンス拡張の土台 |
+| 3 | 3 プロセスでの統合を体験できる | user / chat / realtime を並行起動 |
 
 ---
 
@@ -31,8 +30,7 @@
 ```
 [Browser] <──WebSocket──> [go run realtime-service :8081]
                                     │
-                                    │ gRPC Unary (SaveMessage)
-                                    │ gRPC Server Streaming (SubscribeMessages)
+                                    │ gRPC Unary (SendMessage)
                                     ▼
                           [go run chat-service :50052]
                                     │
@@ -40,8 +38,36 @@
                                     ▼
                           [go run user-service :50051]
 
-                          [docker run redis :6379]  ← realtime-service が Pub/Sub で利用
+                          [docker run redis :6379]
+                             ▲
+                             │ PUBLISH / SUBSCRIBE
+                             │
+                          [realtime-service] (起動時から SUBSCRIBE、並行して PUBLISH)
+
                           [docker run postgres :5432]
+```
+
+**ポイント**: chat-service は「メッセージを永続化するサービス」に専念する。**リアルタイム配信の責務は realtime-service + Redis に集約** される。
+
+---
+
+## 設計の要点: なぜ最初から Redis Pub/Sub か
+
+Phase 4 で realtime-service を **2+ Pod** にすることが前提。
+
+1 Pod だけで動かすなら Go の in-process channel (Hub) で完結するが、Pod が 2 つ以上になると **A 接続 (Pod-1) と B 接続 (Pod-2) をまたいで配信する手段** が必要になる。Redis Pub/Sub はこの fan-out を最小構成で解決する。
+
+Phase 3 の時点でこの構造にしておけば、Phase 4 で realtime-service を複数 Pod に展開しても **Go コードは一切変更しない**。
+
+```
+Phase 3 (1 プロセスだが Redis 経由):
+  realtime-svc ──PUBLISH──→ Redis ──SUBSCRIBE──→ realtime-svc (自分自身)
+                                                      ↓
+                                                  WebSocket 配信
+
+Phase 4 (2 Pod に展開しても同じコードのまま):
+  realtime-svc-1 ──PUBLISH──→ Redis ──SUBSCRIBE──→ realtime-svc-1
+                                     └─SUBSCRIBE──→ realtime-svc-2
 ```
 
 ---
@@ -52,9 +78,8 @@
 |----|--------|----------|
 | A | WebSocket の基礎 | 1〜2 |
 | B | realtime-service の Hub 実装 | 3 |
-| C | gRPC Server Streaming と chat 連携 | 4 |
-| D | Redis Pub/Sub と拡張性 | 5〜7 |
-| E | WebSocket のエラーハンドリング | 8 |
+| C | Redis Pub/Sub とメッセージ配信 | 4〜6 |
+| D | WebSocket のエラーハンドリング | 7 |
 
 ---
 
@@ -120,7 +145,7 @@ func handleWS(w http.ResponseWriter, r *http.Request) {
 
 ## B. realtime-service の Hub 実装
 
-### ステップ 3: Hub パターン
+### ステップ 3: Hub パターン (プロセス内のルーム管理)
 
 realtime-service の骨格を実装する。垂直分割で `internal/hub/` と `internal/ws/` に分ける。
 
@@ -130,7 +155,7 @@ services/realtime-service/
 ├── go.mod
 └── internal/
     ├── config/
-    ├── hub/              # ルーム・クライアント管理
+    ├── hub/              # ルーム・クライアント管理 (プロセス内)
     │   ├── hub.go
     │   ├── room.go
     │   └── client.go
@@ -138,7 +163,7 @@ services/realtime-service/
         └── handler.go
 ```
 
-- [ ] `Hub` 構造体: チャネル経由でイベントを受ける 1 goroutine で動く
+- [ ] `Hub` 構造体: 1 goroutine で動きチャネル経由でイベントを受ける
 - [ ] `Room`: ルームごとのクライアント集合
 - [ ] `Client`: 1 接続 = 読み取り goroutine + 書き込み goroutine の 2 つ
 
@@ -169,54 +194,19 @@ func (h *Hub) Run() {
 |-------------|------|------|
 | `chat_message` | C→S | メッセージ送信 |
 | `chat_message` | S→C | メッセージ配信 |
-| `join_room` | C→S | ルーム参加 |
-| `leave_room` | C→S | ルーム退出 |
-| `presence_update` | S→C | プレゼンス変更 |
+| `subscribe` | C→S | ルーム購読開始 |
+| `unsubscribe` | C→S | ルーム購読解除 |
 | `error` | S→C | エラー通知 |
 
-**確認ポイント**: 複数クライアント (ブラウザ 2 タブや wscat) が同じルームに入り、1 つが送信 → 全員に配信される。
+> **注意**: この Hub は **1 プロセス内の WebSocket 接続を管理するだけ**。複数 Pod をまたぐ配信は次のステップで Redis Pub/Sub に任せる。
+
+**確認ポイント**: ブラウザ 2 タブから同じ realtime-service プロセスに接続し、1 タブが送信 → もう 1 タブに届く (同一プロセス内の Hub 配信のみ)。
 
 ---
 
-## C. gRPC Server Streaming と chat 連携
+## C. Redis Pub/Sub とメッセージ配信
 
-### ステップ 4: gRPC Server Streaming で chat-service とリアルタイム連携
-
-chat-service が発行するイベント (REST 経由で投稿されたメッセージ、編集、削除通知など) を realtime-service に push するためのストリーム。
-
-- [ ] `proto/chat/v1/chat.proto` に以下の RPC を追加:
-
-```protobuf
-service ChatService {
-  // ...既存
-
-  // Server Streaming: chat-service 内のイベントを流す
-  rpc SubscribeMessages(SubscribeRequest) returns (stream ChatEvent);
-}
-```
-
-- [ ] realtime-service 起動時に chat-service の `SubscribeMessages` に接続 (goroutine で永続ストリーム)
-- [ ] chat-service 側は **内部チャネル** をトリガーにストリームに流す
-
-```
-Unary RPC (Phase 2 で実装済み):
-  realtime-service ──リクエスト──→ chat-service
-  realtime-service ←──レスポンス── chat-service
-
-Server Streaming (Phase 3 で実装):
-  realtime-service ──リクエスト──→ chat-service
-  realtime-service ←── ChatEvent 1 ── chat-service
-  realtime-service ←── ChatEvent 2 ── chat-service
-            ...（閉じるまで続く）
-```
-
-**確認ポイント**: chat-service に `SendMessage` (gRPC) を叩くと、その内容が WebSocket でクライアントに届く。
-
----
-
-## D. Redis Pub/Sub と拡張性
-
-### ステップ 5: Redis のローカル起動
+### ステップ 4: Redis のローカル起動と接続
 
 ```bash
 docker run -d --name chat-redis -p 6379:6379 redis:7-alpine
@@ -224,64 +214,123 @@ docker run -d --name chat-redis -p 6379:6379 redis:7-alpine
 
 - [ ] `go-redis` v9 の導入
 - [ ] `PING` コマンドでの接続確認
+- [ ] `internal/pubsub/` パッケージを作成
 
-**確認ポイント**: `docker exec -it chat-redis redis-cli ping` が PONG。
+```go
+// services/realtime-service/internal/pubsub/redis.go
+type Client struct {
+    rdb *redis.Client
+}
+
+func New(addr string) (*Client, error) {
+    rdb := redis.NewClient(&redis.Options{Addr: addr})
+    if err := rdb.Ping(context.Background()).Err(); err != nil {
+        return nil, err
+    }
+    return &Client{rdb: rdb}, nil
+}
+```
+
+**確認ポイント**: `docker exec -it chat-redis redis-cli ping` が PONG。realtime-service 起動時に Redis 接続が確立する。
 
 ---
 
-### ステップ 6: Pub/Sub パターンで配信責務を分離
+### ステップ 5: Publish と Subscribe を実装
+
+メッセージ配信の要となる 2 つの関数を実装する。
+
+- [ ] **Publish**: ルーム単位のチャネルにイベントを流す
+- [ ] **Subscribe**: チャネル購読 → 受信イベントを Hub に流し込む
+
+```go
+// Publish
+func (c *Client) PublishRoomEvent(ctx context.Context, roomID string, payload []byte) error {
+    return c.rdb.Publish(ctx, "room:"+roomID, payload).Err()
+}
+
+// Subscribe (起動時に 1 回だけ起動する goroutine)
+func (c *Client) SubscribeAllRooms(ctx context.Context, onMessage func(channel string, payload []byte)) {
+    pubsub := c.rdb.PSubscribe(ctx, "room:*")
+    defer pubsub.Close()
+
+    ch := pubsub.Channel()
+    for msg := range ch {
+        onMessage(msg.Channel, []byte(msg.Payload))
+    }
+}
+```
+
+- [ ] `PSUBSCRIBE room:*` でパターン購読 (全ルームを一括購読)
+- [ ] 受信したイベントを Hub の `broadcast` チャネルに流す
+
+**確認ポイント**: 別ターミナルで `redis-cli PUBLISH room:general '{"type":"chat_message", ...}'` を叩くと、realtime-service 経由でブラウザに配信される。
+
+---
+
+### ステップ 6: メッセージ投稿フローの完成
+
+WebSocket 受信 → **永続化 + 配信を並行実行** する構造を組む。
 
 ```
 ユーザーA が「こんにちは」を送信:
 
   ブラウザA ──WebSocket──→ realtime-service が受信
                                   │
-                  ┌───────────────┼───────────────┐
-                  │ (並行)        │               │ (並行)
-                  ▼               │               ▼
-          gRPC Unary で           │     Redis Pub/Sub で Publish
-          chat-service に保存      │     (channel:room:<room_id>)
-          (永続化)                │               │
-                  │               │               ▼
-                  ▼               │     同じ realtime-service が Subscribe
-            DB に保存完了          │     → Hub → ルーム内の WebSocket に書き込み
-                                  │               │
-                                  │               ▼
-                                  │     ユーザーB, C のブラウザに届く
+                  ┌───────────────┴───────────────┐
+                  │ (並行)                        │ (並行)
+                  ▼                                ▼
+          gRPC Unary で                   Redis Pub/Sub で Publish
+          chat-service に保存             channel:room:<room_id>
+          (永続化)                                │
+                  │                                ▼
+                  ▼                        全 realtime-service が Subscribe
+            DB に保存完了                  → Hub → ルーム内 WebSocket に配信
+                                                  │
+                                                  ▼
+                                          ユーザーB, C のブラウザに届く
 ```
 
-- [ ] WebSocket 受信 → `chat-service.SaveMessage` (gRPC Unary) **+** Redis `PUBLISH channel:room:<room_id>` を並行実行 (goroutine)
-- [ ] 起動時から同じ channel を Subscribe
-- [ ] Subscribe 側 → Hub → `conn.WriteMessage()` でルーム内の WebSocket に配信
+- [ ] WebSocket 受信ハンドラ内で以下 2 つを **goroutine で並行実行**:
+  - `chat-service.SendMessage` (gRPC Unary) → DB 永続化
+  - Redis `PUBLISH channel:room:<room_id>` → 配信
+- [ ] 起動時から **同じ channel を SUBSCRIBE** しているので、自インスタンスも含め全ての realtime-service に届く
+- [ ] Subscribe 側 → Hub → `conn.WriteMessage()` でルーム内の WebSocket に書き込み
 
-**なぜ Redis を経由させるか**: 1 インスタンスだけなら Hub の channel 直結でも動くが、「受信」と「配信」の責務を Go コード上で分離しておくと、**N インスタンスに増やしてもコード変更なしで動く**。
+```go
+// 擬似コード: ws ハンドラ内
+func (h *wsHandler) onChatMessage(ctx context.Context, userID, roomID, content string) {
+    payload := encodeJSON(chatMessageEvent{...})
 
-**確認ポイント**: メッセージ送信が永続化と配信の両方で動く。`redis-cli SUBSCRIBE channel:room:*` でパブリッシュを直接観察できる。
+    // 永続化 (並行)
+    go func() {
+        _, _ = h.chatClient.SendMessage(ctx, &chatv1.SendMessageRequest{
+            RoomId: roomID, SenderId: userID, Content: content,
+        })
+    }()
+
+    // 配信 (並行)
+    go func() {
+        _ = h.pubsub.PublishRoomEvent(ctx, roomID, payload)
+    }()
+}
+```
+
+**なぜ永続化と配信を並行に分けるか**:
+
+- 配信を **永続化の完了を待たずに** 流せる → 遅延最小化
+- どちらか一方が失敗しても他方は動く (保存は成功して画面には出なかった、など運用上のトレードオフは後で考える)
+- **Phase 4 で realtime-service を N 台にしても同じ Go コードで動く** (Redis が自動的に全インスタンスに配信する)
+
+**確認ポイント**:
+- メッセージ送信で永続化と配信の両方が動く
+- `redis-cli PSUBSCRIBE 'room:*'` でパブリッシュを直接観察できる
+- ブラウザ 2 タブで相互にリアルタイムチャット
 
 ---
 
-### ステップ 7: プレゼンス管理
+## D. WebSocket のエラーハンドリング
 
-Phase 1 で `GetUserPresence` をスタブ実装したが、Phase 3 で realtime-service が実データ源になる。
-
-| 状態 | 説明 |
-|------|------|
-| `online` | 接続中でアクティブ |
-| `away` | 接続中だが非アクティブ |
-| `offline` | 未接続 |
-
-- [ ] Redis キー `presence:<user_id>` (TTL 60s、ハートビートで延長)
-- [ ] WebSocket 接続時に online に、切断時に offline に
-- [ ] ルーム内のオンラインメンバー一覧取得
-- [ ] プレゼンス変更イベントを Pub/Sub で配信
-
-**確認ポイント**: 1 タブで接続 → 別タブで presence 確認 → 最初のタブを閉じる → 一定時間後に offline。
-
----
-
-## E. WebSocket のエラーハンドリング
-
-### ステップ 8: 堅牢な接続管理
+### ステップ 7: 堅牢な接続管理
 
 - [ ] サーバーサイド:
 
@@ -313,14 +362,13 @@ Phase 1 で `GetUserPresence` をスタブ実装したが、Phase 3 で realtime
 Phase 3 完了時に以下が動作していること (すべてローカル):
 
 - [ ] realtime-service が `go run` で起動、`:8081` で WebSocket 受付
-- [ ] Hub パターンで複数クライアントへのブロードキャストが機能
-- [ ] chat-service → realtime-service の gRPC Server Streaming が機能
-- [ ] Redis Pub/Sub で受信と配信の責務が分離されている
+- [ ] Hub パターンで同一プロセス内の WebSocket 管理が機能
+- [ ] Redis Pub/Sub で「永続化」と「配信」の責務が分離されている
+- [ ] WebSocket 投稿 → chat-service に保存 + Redis で全インスタンスへ配信
 - [ ] 3 プロセス (user / chat / realtime) + 2 コンテナ (postgres / redis) でローカル完結
-- [ ] WebSocket 接続/切断でプレゼンスが更新される
 - [ ] ブラウザ 2 タブでリアルタイムチャットが動作
 
-> **まだ無いもの** (Phase 4 で追加): kind クラスタ、Gateway API、Envoy Gateway、SecurityPolicy、Dockerfile、K8s マニフェスト、REST 公開。
+> **まだ無いもの** (Phase 4 で追加): kind クラスタ、Gateway API、Envoy Gateway、SecurityPolicy、Dockerfile、K8s マニフェスト、REST 公開、realtime-service の複数 Pod 展開。
 
 ### ローカル起動フロー (Phase 3 完了時)
 
@@ -348,14 +396,14 @@ wscat -c "ws://localhost:8081/ws?x-user-id=alice-uuid"
 ```
 services/
 ├── user-service/       # Phase 1 完了
-├── chat-service/       # Phase 2 完了 (Server Streaming を Phase 3 で追加)
+├── chat-service/       # Phase 2 完了
 └── realtime-service/   # Phase 3 で新規
     ├── cmd/server/main.go
     ├── internal/
     │   ├── config/
-    │   ├── hub/
-    │   ├── ws/
-    │   └── presence/
+    │   ├── hub/          # プロセス内の WebSocket 管理
+    │   ├── pubsub/       # Redis Pub/Sub クライアント
+    │   └── ws/           # WebSocket ハンドラ
     └── go.mod
 ```
 
@@ -367,9 +415,10 @@ services/
 |----------|------|------|
 | リアルタイム通信 | WebSocket / gorilla/websocket | ブラウザとの双方向通信 |
 | 並行処理 | goroutine / channel / Hub パターン | 1 Hub で複数接続を管理 |
-| gRPC | Server Streaming | サービス間リアルタイム通信 |
-| インメモリ DB | Redis | Pub/Sub + プレゼンス |
-| 配信責務分離 | Redis Pub/Sub | N インスタンス拡張の土台 |
+| メッセージング | Redis Pub/Sub | サービス間 fan-out の標準解 |
+| 配信責務分離 | 永続化 と 配信 を並行実行 | 一方が詰まっても他方が止まらない |
+| 水平スケール前提 | N インスタンスでも同じコード | Phase 4 で Pod 数を増やすだけ |
+| インメモリ DB | Redis | Pub/Sub |
 
 ---
 
@@ -378,9 +427,9 @@ services/
 | リソース | URL |
 |----------|-----|
 | gorilla/websocket | https://github.com/gorilla/websocket |
-| gRPC Server Streaming | https://grpc.io/docs/what-is-grpc/core-concepts/#server-streaming-rpc |
 | go-redis | https://redis.uptrace.dev/ |
 | Redis Pub/Sub | https://redis.io/docs/interact/pubsub/ |
+| Redis `PSUBSCRIBE` | https://redis.io/commands/psubscribe/ |
 
 ---
 
@@ -390,4 +439,4 @@ services/
 
 ## 次のフェーズ
 
-Phase 3 が完了したら [Phase 4: K8s + Envoy Gateway で全サービスをデプロイ](./phase-4.md) に進む。ここで **初めて K8s と Envoy Gateway に触れ**、Phase 1〜3 で作った 3 サービスを全部 kind クラスタに載せる。Envoy Gateway が JWT 検証・REST 公開・ルーティングを担当するので、**サービス側の Go コードは一切変更なし**。
+Phase 3 が完了したら [Phase 4: K8s + Envoy Gateway で全サービスをデプロイ](./phase-4.md) に進む。ここで **初めて K8s と Envoy Gateway に触れ**、Phase 1〜3 で作った 3 サービスを全部 kind クラスタに載せる。**realtime-service は 2+ Pod で起動** し、Redis Pub/Sub が自動的に横連携するため **Go コードは一切変更なし**。
