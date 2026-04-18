@@ -16,6 +16,7 @@ Phase 1〜3 で Go で完成させた 3 サービスを、**K8s (kind) + Envoy G
 | 4 | gRPC-JSON Transcoder で REST を自動公開できる | proto から REST API がブラウザ向けに |
 | 5 | 複数サービスを一気に K8s にデプロイできる | 3 サービス + PostgreSQL + Redis |
 | 6 | 信頼境界を NetworkPolicy で物理担保できる | Envoy 以外からの直接アクセス拒否 |
+| 7 | 水平スケールを Pod 数の変更だけで実現できる | realtime-service を 2 Pod、Redis Pub/Sub が自動で横連携 |
 
 ---
 
@@ -239,11 +240,15 @@ spec:
           readinessProbe: {grpc: {port: 50051}}
 ```
 
-- [ ] user-service: gRPC :50051 + JWKS HTTP :8082
-- [ ] chat-service: gRPC :50052、環境変数に `USER_SERVICE_ADDR=user-service:50051`
-- [ ] realtime-service: WebSocket :8081、`CHAT_SERVICE_ADDR=chat-service:50052`、`REDIS_ADDR=redis:6379`
+- [ ] user-service: gRPC :50051 + JWKS HTTP :8082 (`replicas: 1`)
+- [ ] chat-service: gRPC :50052、環境変数に `USER_SERVICE_ADDR=user-service:50051` (`replicas: 1`)
+- [ ] realtime-service: WebSocket :8081、`CHAT_SERVICE_ADDR=chat-service:50052`、`REDIS_ADDR=redis:6379` **(`replicas: 2` — 水平スケールの検証)**
 
-**確認ポイント**: `kubectl get pods -n chat-app` で 3 サービス + PostgreSQL + Redis が Running。
+> **なぜ realtime-service だけ 2 Pod か**: Phase 3 で Redis Pub/Sub による配信責務分離を実装済みのため、Pod を増やすだけで横連携が効くことを確認する。ブラウザ 2 タブが別々の Pod に接続しても相互にメッセージが届けば成功。
+
+**確認ポイント**:
+- `kubectl get pods -n chat-app` で 3 サービス (realtime は 2 Pod) + PostgreSQL + Redis が Running
+- 別タブのブラウザが別 Pod に接続しても相互にリアルタイム通信できる
 
 ---
 
@@ -474,6 +479,7 @@ wscat -c "ws://localhost:8080/ws?access_token=$ACCESS"
 Phase 4 完了時 (= プロジェクト完了時) に以下が動作していること:
 
 - [ ] kind クラスタ上で 3 サービス + PostgreSQL + Redis + Envoy Gateway が稼働
+- [ ] realtime-service が **2 Pod** で動作し、Redis Pub/Sub により自動で横連携
 - [ ] Envoy Gateway が JWT 検証・REST 変換・ルーティングを YAML だけで実現
 - [ ] サービスの Go コードは Phase 3 から一切変更なし
 - [ ] REST / gRPC / WebSocket の 3 つの入口すべてで認証が効く
@@ -492,12 +498,11 @@ graph TD
       EG -->|JWKS 取得| JWKS[user-service JWKS :8082]
       EG -->|gRPC + x-user-id| US[user-service :50051]
       EG -->|gRPC + x-user-id| CS[chat-service :50052]
-      EG -->|WebSocket| RS[realtime-service :8081]
+      EG -->|WebSocket| RS[realtime-service :8081<br/>replicas: 2]
 
       CS -->|gRPC + x-user-id| US
-      RS -->|gRPC Unary| CS
-      RS <-->|gRPC Server Streaming| CS
-      RS <-->|Pub/Sub| Redis[("Redis")]
+      RS -->|gRPC Unary SendMessage| CS
+      RS <-->|PUBLISH / SUBSCRIBE| Redis[("Redis")]
 
       US --> PG1[("userdb")]
       CS --> PG2[("chatdb")]
