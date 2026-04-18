@@ -6,7 +6,7 @@
 
 1. **マイクロサービスアーキテクチャを学ぶ** — サービス分割、サービス間通信 (gRPC / WebSocket / Pub/Sub)、疎結合、エッジ Gateway の役割を、実際に動くチャットアプリを通じて理解する
 2. **chat サービスを通じて Go の書き方・概念・フローを学ぶ** — 層構造・依存性注入・`context.Context`・goroutine/channel・interface 設計など、Go バックエンドのイディオムを習得する
-3. **実務で通用する現代的なインフラ構成を体験する** — K8s (kind でローカル) / Envoy Gateway (Gateway API) / gRPC という CNCF 三点セットで「モダンで枯れない」構成を手で動かす
+3. **実務で通用する現代的なインフラ構成を体験する** — K8s (kind でローカル) / Envoy Gateway (Gateway API) / gRPC という CNCF 三点セットを手で動かす
 
 **制約**: クラウド費用をかけずローカル (kind) で完結する。マネージドクラウドサービスは使わない。
 
@@ -27,11 +27,10 @@
 |------|------|------|
 | 実行基盤 | **kind (ローカル K8s)** | 本番に近い構成をローカルで検証できる。途中で Docker Compose → K8s に移行するコストを最初から払う |
 | エッジ Gateway | **Envoy Gateway (Gateway API)** | CNCF 標準。JWT 検証・REST↔gRPC 変換・レートリミットが **YAML だけ** で実現。Go で api-gateway を書かない |
-| サービス間通信 | **gRPC (google.golang.org/grpc)** | 業界標準、型安全、コード生成。最も「枯れない」選択 |
+| サービス間通信 | **gRPC (google.golang.org/grpc)** | 業界標準、型安全、コード生成 |
 | クライアント向け REST | **Envoy gRPC-JSON Transcoder** | proto の `google.api.http` アノテーションから REST を自動公開。手書きゼロ |
 | リアルタイム (クライアント) | **WebSocket** | 双方向通信、ブラウザ対応 |
-| リアルタイム (サービス間) | **gRPC Server Streaming** | サービス間の疎結合を維持 |
-| 配信責務の分離 | **Redis Pub/Sub** | 1 インスタンスでも N インスタンス拡張を前提とした設計を学ぶ |
+| リアルタイム配信バス | **Redis Pub/Sub** | Pod 複数展開を前提とした fan-out。Phase 3 から最初から採用 |
 | データストア | **PostgreSQL** 統一 | 学習の焦点をマイクロサービス設計に絞る |
 | 認証 | **自前 JWT + bcrypt** | 仕組みを自分で実装して理解する。Cognito 等は使わない |
 | Proto 管理 | **Buf CLI** | lint / generate / 依存管理を統一 |
@@ -49,11 +48,10 @@ graph TD
 
       EG -->|gRPC + x-user-id| US["user-service"]
       EG -->|gRPC + x-user-id| CS["chat-service"]
-      EG -->|WebSocket| RS["realtime-service"]
+      EG -->|WebSocket| RS["realtime-service<br/>(replicas: 2)"]
 
-      RS <-->|gRPC Server Streaming| CS
-      RS -->|gRPC Unary| CS
-      RS <-->|Pub/Sub| Redis[("Redis")]
+      RS -->|gRPC Unary SendMessage| CS
+      RS <-->|PUBLISH / SUBSCRIBE| Redis[("Redis")]
 
       US --> PG1[("PostgreSQL<br/>userdb")]
       CS --> PG2[("PostgreSQL<br/>chatdb")]
@@ -64,9 +62,9 @@ graph TD
 
 | サービス | 役割 | プロトコル | データストア |
 |---------|------|-----------|------------|
-| **user-service** | ユーザー管理・フレンド機能・認証 | gRPC | PostgreSQL |
-| **chat-service** | チャットルーム・メッセージ管理 | gRPC | PostgreSQL |
-| **realtime-service** | WebSocket 接続・リアルタイム配信 | WebSocket + gRPC | Redis |
+| **user-service** | ユーザー管理・認証 (friends/1:1 DM なし) | gRPC | PostgreSQL |
+| **chat-service** | 公開ルーム・メンバーシップ・メッセージ永続化 | gRPC Unary のみ | PostgreSQL |
+| **realtime-service** | WebSocket 接続・Redis Pub/Sub 経由で fan-out (Phase 4 で 2 Pod) | WebSocket + gRPC Unary (chat 呼び出し用) | Redis |
 | **Envoy Gateway** (Go 実装なし) | 認証・ルーティング・REST↔gRPC 変換 | YAML 設定のみ | - |
 
 ## 技術スタック
@@ -178,9 +176,9 @@ go test ./...
 | Phase | 内容 | 状態 |
 |-------|------|------|
 | 0 | **プロジェクト骨組み** — Go Workspace / Buf CLI / ディレクトリ規約 / Makefile スケルトン (K8s / Envoy には触れない) | 未着手 |
-| 1 | **user-service (Go で完結)** — Go 基礎 + gRPC + PostgreSQL + 認証プリミティブ (bcrypt / RS256 / JWKS) + フレンド | 未着手 |
+| 1 | **user-service (Go で完結)** — Go 基礎 + gRPC + PostgreSQL + 認証プリミティブ (bcrypt / RS256 / JWKS) + プロフィール管理 | 未着手 |
 | 2 | **chat-service (Go で完結)** — Room / Message + サービス間 gRPC 通信 (localhost で 2 プロセス並走) | 未着手 |
-| 3 | **realtime-service (Go で完結)** — WebSocket + Hub + gRPC Server Streaming + Redis Pub/Sub (localhost で 3 プロセス並走) | 未着手 |
+| 3 | **realtime-service (Go で完結)** — WebSocket + Hub + **Redis Pub/Sub (最初から採用)** (localhost で 3 プロセス並走、Phase 4 で 2 Pod 展開する前提) | 未着手 |
 | 4 | **K8s + Envoy で全サービスをデプロイ** — kind / Gateway API / Envoy Gateway / SecurityPolicy / Transcoder / NetworkPolicy | 未着手 |
 
 > Phase 構成は 2026-04-17 に再編。「Go 集中期間 (1-3)」と「インフラ集中期間 (4)」を分離。Phase 1-3 では `docker run postgres/redis` + `go run` でローカル完結、Phase 4 で kind + Envoy に載せ替え。**サービス側の Go コードは Phase 4 で一切変更しない**。
@@ -194,5 +192,7 @@ go test ./...
 - [Phase 4: K8s + Envoy でデプロイ](docs/learning/phase-4.md)
 - [マイクロサービス詳細設計](docs/architecture/microservices.md)
 - [API 設計](docs/architecture/api-design.md)
+- [クライアント画面設計](docs/architecture/client-screens.md)
 - [データモデル](docs/architecture/data-model.md)
 - [ディレクトリ構成](docs/architecture/directory-structure.md)
+- [リアルタイムメッセージ配信フロー](docs/flow/realtime-message-flow.md)
