@@ -1,8 +1,8 @@
-# リアルタイムメッセージ配信フロー (Phase 3)
+# リアルタイムメッセージ配信フロー (Phase 2 realtime-service)
 
-Phase 3 で組む「Alice が送ったメッセージが Bob の画面にリアルタイムで届く」までの流れを、**どのプロセスの何行目が動くか** まで追いかけて解説する。
+Phase 2 で組む「Alice が送ったメッセージが Bob の画面にリアルタイムで届く」までの流れを、**どのプロセスの何行目が動くか** まで追いかけて解説する。
 
-**Redis Pub/Sub を最初から配信バスとして使う** 設計。Phase 4 で realtime-service を複数 Pod に展開しても Go コードを変更しなくて済むようにする。
+**Redis Pub/Sub を最初から配信バスとして使う** 設計。realtime-service は **プロセス (あるいは Pod) を複数並べても Go コードを変更しなくて済む** よう、最初から Pub/Sub 前提で実装する。infra リポジトリ側で docker-compose scale / K8s replicas をどう設定しても、app 側のコードは一切変わらない。
 
 ---
 
@@ -62,7 +62,7 @@ func (c *Client) SubscribeAllRooms(ctx context.Context, onMessage func(ch string
 realtime-service ══ Redis SUBSCRIBE (アイドル) ══ Redis
 ```
 
-これが Phase 3 の肝になる通信路。以降の ④〜⑤ で実際にイベントが流れる。
+これが realtime-service 実装の肝になる通信路。以降の ④〜⑤ で実際にイベントが流れる。
 
 ---
 
@@ -140,11 +140,11 @@ Redis は `PUBLISH room:general <payload>` を受け取ると、**`room:*` を S
 ```
          ┌──push──→ realtime-svc (自分自身)
 Redis ───┤
-         ├──push──→ realtime-svc-2 (Phase 4 で複数 Pod になったら)
+         ├──push──→ realtime-svc-2 (別プロセス / 別レプリカにも届く)
          └──push──→ realtime-svc-3 (...)
 ```
 
-**Phase 3 では realtime-service は 1 インスタンスだが、自分自身も SUBSCRIBE しているので届く**。Phase 4 で Pod を増やしても同じコードのまま横連携が効く。
+**1 インスタンスだけでも自分自身で SUBSCRIBE しているので届く**。複数プロセス / 複数レプリカに増やしても同じコードのまま横連携が効く。
 
 ---
 
@@ -260,7 +260,7 @@ chat-service は **realtime-service の存在を知らなくて済む**。Redis 
 
 ### そもそも「何を解決したいのか」
 
-realtime-service が **1 プロセス内では Hub (Go channel) で WebSocket 間の配信ができる**。でも Phase 4 で realtime-service を 2 Pod にすると、こうなる:
+realtime-service が **1 プロセス内では Hub (Go channel) で WebSocket 間の配信ができる**。でも複数プロセスや複数レプリカに増やすと、こうなる:
 
 ```
 Alice は realtime-svc-1 に WebSocket 接続している
@@ -321,26 +321,22 @@ realtime-service のインスタンス達を「家」、ブラウザを「住人
 
 ---
 
-## Phase 4 でどう化けるか
+## プロセスを複数に増やすとどう化けるか
 
-Phase 3 の時点で realtime-service を **1 インスタンスだけで動かしていても**、Redis 経由で publish/subscribe する構造を最初から組んである。その副作用:
+realtime-service は **1 プロセスだけで動かしていても**、Redis 経由で publish/subscribe する構造を最初から組んである。その副作用:
 
-**Phase 4 で Deployment の `replicas: 2` にするだけで**:
+**docker-compose で `--scale realtime-service=2`、あるいは K8s で `replicas: 2` にするだけで** (どちらも infra 側の宣言を変えるだけで app のコードは無変更):
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: realtime-service}
-spec:
-  replicas: 2   # ← ここを 1 → 2 に変えるだけ
-```
+- Alice はプロセス A に接続、Bob はプロセス B に接続
+- Alice の投稿はプロセス A から Redis に PUBLISH
+- Redis がプロセス A とプロセス B の両方に push
+- プロセス B の Hub が Bob に WebSocket で配信
 
-- Alice は Pod-A に接続、Bob は Pod-B に接続
-- Alice の投稿は Pod-A から Redis に PUBLISH
-- Redis が Pod-A と Pod-B の両方に push
-- Pod-B の Hub が Bob に WebSocket で配信
+**app 側の Go コードは一切変更しない**。これが realtime-service 実装で最初から Redis を使う最大の理由。
 
-**Go コードは一切変更しない**。これが Phase 3 で最初から Redis を使う最大の理由。
+### 手元での検証 (infra repo を立てずに)
+
+Redis を docker で 1 個立て、`go run ./services/realtime-service/cmd/server` を **ポートを変えて 2 プロセス** 起動すれば、同じ挙動が `PORT=8081` と `PORT=8082` のプロセス間で確認できる (詳細は [Phase 2 ステップ 8](../phase/phase-2.md))。
 
 ---
 
@@ -354,12 +350,12 @@ spec:
 | Redis Pub/Sub | **プロセス (Pod) を跨いだ配信バス** |
 | 永続化と配信の並行 | 遅延最小化 + 責務分離 |
 
-chat-service は **永続化専任**。配信は **realtime-service + Redis** のコンビで完結する。Phase 4 で realtime-service を複数 Pod に増やしても同じコードのまま動く。
+chat-service は **永続化専任**。配信は **realtime-service + Redis** のコンビで完結する。realtime-service を複数 Pod に増やしても同じコードのまま動く。
 
 ---
 
 ## 参考
 
-- [Phase 3 ドキュメント](../learning/phase-3.md)
+- [Phase 2 ドキュメント](../phase/phase-2.md)
 - [API Design](../architecture/api-design.md)
 - [Microservices 概要](../architecture/microservices.md)
