@@ -1,71 +1,75 @@
-# Go Microservices Chat
+# Go Microservices Chat (app repo)
 
-リアルタイムチャットプラットフォームを **Go + gRPC + Kubernetes (kind) + Envoy Gateway** で構築するマイクロサービス学習プロジェクト。
+リアルタイムチャットプラットフォームの **アプリケーションコード + dev E2E 環境** を担うリポジトリ。Go + gRPC + Redis Pub/Sub + WebSocket でマイクロサービス設計を学ぶ。
 
-## プロジェクトの目的
+**本番向けのオーケストレーション (K8s / Gateway API / SecurityPolicy / Helm / NetworkPolicy 等) は別リポジトリに分離**。このリポジトリには Go サービス / proto / Dockerfile + **dev 専用の `compose.yaml` + `envoy.yaml` + E2E スクリプト** を置く。
 
-1. **マイクロサービスアーキテクチャを学ぶ** — サービス分割、サービス間通信 (gRPC / WebSocket / Pub/Sub)、疎結合、エッジ Gateway の役割を、実際に動くチャットアプリを通じて理解する
-2. **chat サービスを通じて Go の書き方・概念・フローを学ぶ** — 層構造・依存性注入・`context.Context`・goroutine/channel・interface 設計など、Go バックエンドのイディオムを習得する
-3. **実務で通用する現代的なインフラ構成を体験する** — K8s (kind でローカル) / Envoy Gateway (Gateway API) / gRPC という CNCF 三点セットを手で動かす
+## プロジェクトの目的 (2 軸)
 
-**制約**: クラウド費用をかけずローカル (kind) で完結する。マネージドクラウドサービスは使わない。
+1. **マイクロサービスアーキテクチャを学ぶ** — サービス分割 / gRPC サービス間通信 / Database per Service / Redis Pub/Sub による WebSocket 水平スケール / 認証発行の責務分離
+2. **chat サービスを通じて Go の書き方・概念・フローを学ぶ** — 層構造 / 依存性注入 / `context.Context` / goroutine + channel / interface によるテスト容易性
 
-## 想定規模
+## スコープ
 
-| 項目 | 想定値 |
-|------|--------|
-| 同時接続ユーザー数 | 〜100 人 |
-| 総ユーザー数 | 〜1,000 人 |
-| チャットルーム数 | 〜100 |
-| メッセージ量 | 〜1,000 件/日 |
+### このリポジトリに含めるもの
+- 3 マイクロサービス (`user-service` / `chat-service` / `realtime-service`) の Go 実装
+- proto 定義 + Buf 生成コード
+- 共有パッケージ (`pkg/auth/` 他)
+- 各サービスの Dockerfile (Phase 3)
+- **Go 単体テスト** (InMem Repository + fake クライアントで完結、`go test ./...` が外部依存ゼロで PASS)
+- **dev / E2E 専用の `compose.yaml` + `envoy.yaml` + `scripts/e2e/*.sh`** (Phase 4) — Envoy standalone 経由で JWT 検証経路を含む全フローを手元で確認。`make e2e-all` で立ち上げ → 全シナリオ → 片付けまで一気通貫
 
-> 学習プロジェクトのため実トラフィックはない。ローカル kind クラスタで動く規模を想定する。
+### このリポジトリに **含めない** もの
+- 本番向け K8s マニフェスト / Gateway API / SecurityPolicy / Helm chart → infra リポジトリの責務
+- JWT **検証** ロジック (Go 側には書かない) → dev では Envoy standalone、本番では Envoy Gateway が担当
+- NetworkPolicy / Rate Limit / TLS 終端 / Observability 等の運用系 → infra 側
 
-## 主な設計判断
+## 信頼境界 (重要)
 
-| 判断 | 選定 | 理由 |
-|------|------|------|
-| 実行基盤 | **kind (ローカル K8s)** | 本番に近い構成をローカルで検証できる。途中で Docker Compose → K8s に移行するコストを最初から払う |
-| エッジ Gateway | **Envoy Gateway (Gateway API)** | CNCF 標準。JWT 検証・REST↔gRPC 変換・レートリミットが **YAML だけ** で実現。Go で api-gateway を書かない |
-| サービス間通信 | **gRPC (google.golang.org/grpc)** | 業界標準、型安全、コード生成 |
-| クライアント向け REST | **Envoy gRPC-JSON Transcoder** | proto の `google.api.http` アノテーションから REST を自動公開。手書きゼロ |
-| リアルタイム (クライアント) | **WebSocket** | 双方向通信、ブラウザ対応 |
-| リアルタイム配信バス | **Redis Pub/Sub** | Pod 複数展開を前提とした fan-out。Phase 3 から最初から採用 |
-| データストア | **PostgreSQL** 統一 | 学習の焦点をマイクロサービス設計に絞る |
-| 認証 | **自前 JWT + bcrypt** | 仕組みを自分で実装して理解する。Cognito 等は使わない |
-| Proto 管理 | **Buf CLI** | lint / generate / 依存管理を統一 |
-| HTTP / gRPC ライブラリ | **google.golang.org/grpc** (Connect RPC ではない) | 採用実績と求人需要で圧倒的に優位 |
-| サービス内部構成 | **垂直分割 (package-per-feature)** | Go 標準ライブラリのイディオムに合わせる |
+**アプリ側 Go コードは JWT を検証しない**。常に upstream (ゲートウェイ) から渡される `x-user-id` メタデータを信じて読むだけ。Istio / Google Cloud ESP / AWS API Gateway 等と同じパターン。
+
+| 責務 | 所在 |
+|------|------|
+| JWT **発行** (login 時の署名) | `user-service` (本リポジトリ) |
+| JWKS **配信** (公開鍵を HTTP で公開) | `user-service` (本リポジトリ) |
+| JWT **検証** (署名・期限・issuer) | **infra 側 Envoy** (compose: standalone / K8s: Envoy Gateway) |
+| `x-user-id` メタデータを信じて読む | 全サービス (本リポジトリ) — `pkg/auth/context.go` の `RequesterID(ctx)` |
+
+bufconn / 手動動作確認では `metadata.AppendToOutgoingContext(ctx, "x-user-id", "alice-uuid")` で直接注入してテストする。
 
 ## アーキテクチャ
 
 ```mermaid
-graph TD
-    Client["Client<br/>(browser / grpcurl / curl)"] -->|REST / gRPC / WebSocket| EG
-
-    subgraph "kind cluster"
-      EG["Envoy Gateway<br/>(Gateway API 実装)<br/>JWT 検証 / REST↔gRPC 変換 / WebSocket 転送"]
-
-      EG -->|gRPC + x-user-id| US["user-service"]
-      EG -->|gRPC + x-user-id| CS["chat-service"]
-      EG -->|WebSocket| RS["realtime-service<br/>(replicas: 2)"]
-
-      RS -->|gRPC Unary SendMessage| CS
-      RS <-->|PUBLISH / SUBSCRIBE| Redis[("Redis")]
-
-      US --> PG1[("PostgreSQL<br/>userdb")]
-      CS --> PG2[("PostgreSQL<br/>chatdb")]
+graph LR
+    subgraph "外側 (infra repo 責務)"
+      GW["Envoy<br/>JWT 検証 → x-user-id 注入"]
     end
+
+    subgraph "本リポジトリ (app)"
+      US["user-service (gRPC)<br/>JWT 発行 + JWKS 配信"]
+      CS["chat-service (gRPC)"]
+      RS["realtime-service<br/>WebSocket + Hub"]
+    end
+
+    GW -->|gRPC + x-user-id| US
+    GW -->|gRPC + x-user-id| CS
+    GW -->|WebSocket| RS
+
+    RS -->|gRPC SendMessage| CS
+    RS <-->|PUBLISH / SUBSCRIBE| Redis[("Redis")]
+    US --> PG1[("userdb")]
+    CS --> PG2[("chatdb")]
 ```
 
 ## サービス一覧
 
 | サービス | 役割 | プロトコル | データストア |
 |---------|------|-----------|------------|
-| **user-service** | ユーザー管理・認証 (friends/1:1 DM なし) | gRPC | PostgreSQL |
-| **chat-service** | 公開ルーム・メンバーシップ・メッセージ永続化 | gRPC Unary のみ | PostgreSQL |
-| **realtime-service** | WebSocket 接続・Redis Pub/Sub 経由で fan-out (Phase 4 で 2 Pod) | WebSocket + gRPC Unary (chat 呼び出し用) | Redis |
-| **Envoy Gateway** (Go 実装なし) | 認証・ルーティング・REST↔gRPC 変換 | YAML 設定のみ | - |
+| **user-service** | User CRUD + JWT 発行 + JWKS 配信 | gRPC + JWKS HTTP | PostgreSQL (`userdb`) |
+| **chat-service** | 公開ルーム / メンバーシップ / メッセージ永続化 | gRPC Unary | PostgreSQL (`chatdb`) |
+| **realtime-service** | WebSocket 接続 + Redis Pub/Sub 経由で fan-out | WebSocket + gRPC client (chat 呼び出し用) | Redis (bus として) |
+
+> user-service と chat-service は別 DB (`userdb` / `chatdb`) に論理分離。接続先は env var (`DATABASE_URL`) で差し替え可能。物理分離したければ infra repo 側で PG インスタンスを 2 つ立てる。
 
 ## 技術スタック
 
@@ -73,123 +77,85 @@ graph TD
 |---------|------|
 | 言語 | Go 1.22 |
 | RPC | gRPC (`google.golang.org/grpc`) + Protocol Buffers (Buf CLI) |
-| DB ドライバー | pgx v5 (PostgreSQL) |
-| ログ | log/slog |
-| 実行基盤 | Kubernetes (kind) |
-| エッジ Gateway | Envoy Gateway (Gateway API) |
-| パッケージ管理 | Helm (Envoy Gateway インストール用) |
-| コンテナ | Docker (multi-stage build) |
-| 認証 | 自前 JWT (golang-jwt/jwt) + bcrypt |
-| キャッシュ/Pub/Sub | Redis (go-redis) |
+| DB ドライバ | pgx v5 (PostgreSQL) |
+| ログ | log/slog (JSON) |
+| JWT 署名 | golang-jwt/jwt (RS256、**発行のみ**) |
+| Pub/Sub | Redis (go-redis) |
 | WebSocket | gorilla/websocket |
+| コンテナ | Docker (multi-stage build / distroless) |
 
 ## プロジェクト構成
 
 ```
 go-microservices-chat/
-├── services/                  # マイクロサービス (Go コード)
-│   ├── user-service/          # Phase 0 で最小版、Phase 1 で完成
-│   ├── chat-service/          # Phase 2 で追加
-│   └── realtime-service/      # Phase 3 で追加
+├── services/                  # マイクロサービス実装
+│   ├── user-service/          # Phase 1 (+ Phase 3 で Dockerfile)
+│   ├── chat-service/          # Phase 1 で Room、Phase 2 で Message を追加
+│   └── realtime-service/      # Phase 2
 ├── proto/                     # Protocol Buffers 定義 (API の一次ソース)
-├── gen/go/                    # Buf 生成コード
-├── pkg/                       # 共有パッケージ (auth, logger, interceptor, errors)
-├── deploy/                    # K8s マニフェスト / Envoy Gateway 設定
-│   ├── kind-config.yaml
-│   ├── gateway/               # Gateway / GRPCRoute / SecurityPolicy
-│   ├── services/              # 各サービスの Deployment / Service
-│   ├── postgres/              # PostgreSQL StatefulSet
-│   └── redis/                 # Redis Deployment
+├── gen/go/                    # Buf 生成コード (`buf generate` で再生成)
+├── pkg/                       # 共有パッケージ
+│   ├── auth/
+│   │   ├── issuer.go          # RS256 JWT 発行 (秘密鍵で署名)
+│   │   ├── jwks.go            # JWKS HTTP Handler (公開鍵を JSON で配る)
+│   │   └── context.go         # RequesterID(ctx) helper
+│   └── interceptor/
+│       └── logging.go         # gRPC Logging Interceptor
+├── compose.yaml               # ★ Phase 4: dev / E2E 専用
+├── envoy.yaml                 # ★ Phase 4: Envoy standalone (JWT 検証 filter)
+├── scripts/e2e/               # ★ Phase 4: E2E シナリオ
 ├── docs/                      # 設計ドキュメント
-├── Makefile                   # kind / buf / deploy コマンド
-└── go.work                    # Go Workspace
+├── Makefile                   # proto-gen / test / image-build / e2e-{up,run,down}
+├── go.work                    # Go Workspace
+└── .gitignore
 ```
-
-> `docker-compose.yml` / `services/api-gateway/` は **使わない**。すべて K8s + Envoy Gateway で完結。
 
 ## セットアップ
 
-### 前提条件
+### 前提ツール
 
-**Phase 0〜3 (Go 開発期間) に必要**:
 - Go 1.22+
-- Docker (PostgreSQL / Redis を単発で `docker run` する)
 - [Buf CLI](https://buf.build/docs/installation)
-- [grpcurl](https://github.com/fullstorydev/grpcurl)
-- [golang-migrate](https://github.com/golang-migrate/migrate) CLI
+- Docker + docker compose
+- `grpcurl` / `wscat` / `jq` (Phase 4 の E2E 検証用)
 
-**Phase 4 (K8s 期間) で追加**:
-- [kind](https://kind.sigs.k8s.io/) (ローカル K8s クラスタ)
-- [kubectl](https://kubernetes.io/docs/tasks/tools/)
-- [helm](https://helm.sh/)
+> `go test ./...` は InMem Repository + fake クライアントで完結 (Postgres / Redis 無しで PASS)。**実 PG / 実 Redis / JWT 検証経路までを通した検証は Phase 4 の `make e2e-all`** で本リポジトリ内で完結する。
 
-### Phase 0-3 の起動 (Go で完結)
+### 実行
 
 ```bash
-# 1. Proto コード生成
+# proto コード生成
 make proto-gen
 
-# 2. PostgreSQL / Redis を単発起動
-make db-up         # docker run postgres
-make redis-up      # docker run redis (Phase 3 以降で必要)
-make db-migrate
-
-# 3. サービスを並行起動 (別ターミナルで)
-make run-user      # Phase 1 完了後
-make run-chat      # Phase 2 完了後
-make run-realtime  # Phase 3 完了後
-
-# 4. 動作確認 (x-user-id を手動注入)
-grpcurl -plaintext -H "x-user-id: <uuid>" \
-  localhost:50051 user.v1.UserService/GetUser
-```
-
-### Phase 4 の起動 (K8s + Envoy)
-
-```bash
-# 1. kind クラスタ + Gateway
-make cluster-up
-make gateway-install
-
-# 2. 全サービスのビルドと K8s デプロイ
-make image-build-all
-make deploy-all     # PostgreSQL / Redis / 3 サービス / Gateway / SecurityPolicy
-
-# 3. port-forward
-kubectl -n envoy-gateway-system port-forward svc/<gateway-svc-name> 8080:80 50051:50051
-
-# 4. REST でログイン → 保護エンドポイントを叩く
-curl -X POST http://localhost:8080/api/v1/auth/login ...
-```
-
-### テスト
-
-```bash
-# Go 単体テスト (K8s 不要、Phase 0-3 のどの段階でも動く)
+# 単体テスト (外部依存ゼロで PASS)
 go test ./...
+
+# Docker イメージビルド (Phase 3)
+make image-build-all
+
+# E2E 検証 (Phase 4: compose 立ち上げ → シナリオ実行 → 片付け)
+make e2e-all
 ```
 
-## 開発フェーズ
+本番向けの K8s デプロイは別リポジトリ `go-microservices-chat-infra` (想定) が担当。
 
-**技術軸で分離した 5 Phase 構成 (Phase 0〜4)**。Phase 1〜3 は Go に集中し、Phase 4 で K8s + Envoy に集中する。途中で構成変更や切り替えが起きないように、サービス側の Go コード設計 (`TrustedUserID` Interceptor + JWT 発行のみで検証なし) を工夫してある。
+## 開発フェーズ (4 Phase)
 
-| Phase | 内容 | 状態 |
+| Phase | 内容 | 成果物 |
 |-------|------|------|
-| 0 | **プロジェクト骨組み** — Go Workspace / Buf CLI / ディレクトリ規約 / Makefile スケルトン (K8s / Envoy には触れない) | 未着手 |
-| 1 | **user-service (Go で完結)** — Go 基礎 + gRPC + PostgreSQL + 認証プリミティブ (bcrypt / RS256 / JWKS) + プロフィール管理 | 未着手 |
-| 2 | **chat-service (Go で完結)** — Room / Message + サービス間 gRPC 通信 (localhost で 2 プロセス並走) | 未着手 |
-| 3 | **realtime-service (Go で完結)** — WebSocket + Hub + **Redis Pub/Sub (最初から採用)** (localhost で 3 プロセス並走、Phase 4 で 2 Pod 展開する前提) | 未着手 |
-| 4 | **K8s + Envoy で全サービスをデプロイ** — kind / Gateway API / Envoy Gateway / SecurityPolicy / Transcoder / NetworkPolicy | 未着手 |
+| **1** | user-service (JWT 発行 + JWKS 配信 + User CRUD) + chat-service (Room) + InMem テスト完結 | `services/user-service/` / `services/chat-service/` / bufconn テスト PASS |
+| **2** | chat-service Message + realtime-service (WebSocket + Hub + Redis Pub/Sub) | `services/realtime-service/` / pubsub interface の InMem + Redis 両実装 |
+| **3** | 3 サービスの Dockerfile (multi-stage / distroless) + `make image-build-all` | 3 Dockerfile + イメージ |
+| **4** | `compose.yaml` + `envoy.yaml` + `scripts/e2e/*.sh` — Envoy standalone 経由で golden path / Pub/Sub 複数インスタンス / 認証失敗ケースを検証 | 動作確認済みの dev stack + E2E スクリプト一式 |
 
-> Phase 構成は 2026-04-17 に再編。「Go 集中期間 (1-3)」と「インフラ集中期間 (4)」を分離。Phase 1-3 では `docker run postgres/redis` + `go run` でローカル完結、Phase 4 で kind + Envoy に載せ替え。**サービス側の Go コードは Phase 4 で一切変更しない**。
+> Phase 4 まで完了した時点で **Envoy の JWT 検証経路を含む全フローが手元で動く**。infra リポジトリはこれを K8s (Deployment / Gateway API / SecurityPolicy) に写すのが主な作業になる。
 
 ## ドキュメント
 
-- [Phase 0: プロジェクト骨組み](docs/learning/phase-0.md)
-- [Phase 1: user-service (Go で完結)](docs/learning/phase-1.md)
-- [Phase 2: chat-service (Go で完結)](docs/learning/phase-2.md)
-- [Phase 3: realtime-service (Go で完結)](docs/learning/phase-3.md)
-- [Phase 4: K8s + Envoy でデプロイ](docs/learning/phase-4.md)
+- [Phase 1: user + room 実装](docs/phase/phase-1.md)
+- [Phase 2: Message + realtime-service](docs/phase/phase-2.md)
+- [Phase 3: Dockerfile + イメージビルド](docs/phase/phase-3.md)
+- [Phase 4: compose + Envoy + E2E](docs/phase/phase-4.md)
 - [マイクロサービス詳細設計](docs/architecture/microservices.md)
 - [API 設計](docs/architecture/api-design.md)
 - [クライアント画面設計](docs/architecture/client-screens.md)
