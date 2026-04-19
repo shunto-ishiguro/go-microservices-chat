@@ -113,15 +113,14 @@ CREATE INDEX idx_messages_sender ON messages(sender_id);
 
 ## realtime-service: Redis
 
-永続化は不要 (揮発データ)。realtime-service は Phase 3 から Redis Pub/Sub を経由させて配信する (Phase 4 で 2+ Pod に展開しても Go コード変更なし)。
+永続化は不要 (揮発データ)。realtime-service は Phase 2 の実装時点から Redis Pub/Sub を経由させて配信する (複数プロセス / 複数レプリカでも Go コード変更なし)。
 
 ```
 # Pub/Sub チャンネル (PUBLISH した内容を全 realtime-service インスタンスが SUBSCRIBE)
 room:<room_id>                  → ルーム内メッセージ配信用
-
-# レートリミット (Phase 4: Envoy BackendTrafficPolicy 経由)
-ratelimit:login:<ip>            → カウンター (TTL つき)
 ```
+
+> レートリミットや認証系の付加機能は infra 側 Envoyの責務。このリポジトリでは Redis を Pub/Sub 配信バス専用として扱う。
 
 ---
 
@@ -144,7 +143,7 @@ type postgresUserRepository struct {
 }
 ```
 
-単体テストでは in-memory fake、結合テストでは kind クラスタ上で起動した PostgreSQL (port-forward 経由) を使う。
+単体テストでは in-memory fake で `go test ./...` を外部依存ゼロで PASS させる。実 PostgreSQL との結合検証は infra リポジトリ側で compose / K8s を立てて行う。
 
 ---
 
