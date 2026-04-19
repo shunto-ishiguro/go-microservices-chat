@@ -2,9 +2,10 @@
 
 ## 設計方針
 
-- **サービス内部は垂直分割 (package-per-feature)**：`internal/<domain>/` にエンティティ・サービス・リポジトリ・gRPC サーバーを集約。`user.Service`, `user.Repository` のように Go 標準ライブラリ風に呼び出せる
-- **K8s マニフェストは `deploy/` に集約**：サービスごとに分割、Gateway 系は別ディレクトリ
-- **api-gateway の Go 実装は持たない**：Envoy Gateway (YAML) が担当するため
+- **サービス内部は垂直分割 (package-per-feature)**: `internal/<domain>/` にエンティティ・サービス・リポジトリ・gRPC サーバーを集約。`user.Service`, `user.Repository` のように Go 標準ライブラリ風に呼び出せる
+- **本番向け K8s マニフェストは別リポジトリ**: Deployment / Gateway API / SecurityPolicy / NetworkPolicy / Helm は infra 側。env var で全ての接続先を受け取る 12-factor 前提
+- **dev / E2E 専用の `compose.yaml` + `envoy.yaml` は本リポジトリに持つ** (Phase 4): Envoy standalone 経由で JWT 検証経路まで含む E2E を手元で回すため
+- **api-gateway の Go 実装は持たない**: JWT 検証は Envoy (dev: standalone / 本番: Envoy Gateway) の責務
 
 ---
 
@@ -13,19 +14,20 @@
 ```
 go-microservices-chat/
 ├── go.work                          # Go Workspace 定義
-├── Makefile                         # kind / buf / deploy コマンド集約
+├── Makefile                         # proto-gen / test / image-build
 ├── README.md
-├── .github/workflows/ci.yml         # CI: lint + test + buf lint
+├── .gitignore
 │
 ├── docs/
 │   ├── architecture/
-│   └── learning/
+│   ├── flow/
+│   └── phase/
 │
 ├── proto/                           # Protocol Buffers 定義 (API の一次ソース)
 │   ├── buf.yaml
 │   ├── buf.gen.yaml
-│   ├── user/v1/user.proto           # (Phase 0 から先行あり)
-│   └── chat/v1/chat.proto           # (Phase 2 で追加)
+│   ├── user/v1/user.proto           # (Phase 1)
+│   └── chat/v1/chat.proto           # (Phase 1: Room / Phase 2: Message 追加)
 │   # realtime-service は WebSocket + Redis Pub/Sub のみで、gRPC を公開しない → realtime.proto なし
 │
 ├── gen/go/                          # Buf 生成コード (Go モジュール)
@@ -33,53 +35,23 @@ go-microservices-chat/
 │   └── chat/v1/
 │
 ├── pkg/                             # 共有パッケージ
-│   ├── auth/                        # JWT 発行 (Phase 1)・JWKS 提供
-│   ├── logger/                      # slog 初期化
-│   ├── interceptor/                 # gRPC インターセプター
-│   ├── config/                      # 環境変数ヘルパー
-│   ├── errors/                      # 共通エラー型
-│   └── testutil/
+│   ├── auth/                        # JWT 発行 (Issuer) / JWKS Handler / RequesterID
+│   └── interceptor/                 # gRPC Logging Interceptor
 │
 ├── services/                        # マイクロサービス本体 (Go コード)
-│   ├── user-service/                # Phase 1 で実装
-│   ├── chat-service/                # Phase 2 で追加
-│   └── realtime-service/            # Phase 3 で追加
-│   # api-gateway/ は存在しない (Envoy Gateway が YAML で担当)
+│   ├── user-service/                # Phase 1 で実装 (+ Phase 3 で Dockerfile)
+│   ├── chat-service/                # Phase 1: Room / Phase 2: Message (+ Phase 3 で Dockerfile)
+│   └── realtime-service/            # Phase 2 で追加 (+ Phase 3 で Dockerfile)
 │
-├── deploy/                          # K8s マニフェスト・Envoy Gateway 設定 (全部 Phase 4 で作成)
-│   ├── kind-config.yaml             # kind クラスタ構成
-│   ├── gateway/                     # Gateway API リソース (Phase 4)
-│   │   ├── gateway.yaml             # Gateway (リスナー定義)
-│   │   ├── user-public.yaml         # GRPCRoute (Register/Login/Refresh/Health)
-│   │   ├── user-protected.yaml      # GRPCRoute (保護 RPC)
-│   │   ├── chat-protected.yaml      # GRPCRoute (chat-service)
-│   │   ├── realtime-route.yaml      # HTTPRoute (WebSocket)
-│   │   ├── jwt-auth.yaml            # SecurityPolicy (RS256 + JWKS)
-│   │   ├── rate-limit.yaml          # BackendTrafficPolicy (Rate Limit)
-│   │   └── http-transcoder.yaml     # gRPC-JSON Transcoder (REST 自動公開)
-│   ├── services/
-│   │   ├── user-service/
-│   │   │   ├── deployment.yaml
-│   │   │   ├── service.yaml
-│   │   │   ├── secret.yaml
-│   │   │   ├── networkpolicy.yaml
-│   │   │   └── migration-job.yaml
-│   │   ├── chat-service/
-│   │   └── realtime-service/
-│   ├── postgres/
-│   │   ├── statefulset.yaml
-│   │   ├── service.yaml
-│   │   └── secret.yaml
-│   └── redis/
-│       ├── deployment.yaml
-│       └── service.yaml
-│
-└── scripts/                         # ユーティリティ
-    ├── load-migrations.sh           # SQL を ConfigMap にロード
-    └── proto-descriptor.sh          # Transcoder 用の descriptor 生成
+├── compose.yaml                     # ★ Phase 4: dev / E2E 専用 (本番向けではない)
+├── envoy.yaml                       # ★ Phase 4: Envoy standalone 設定 (JWT filter + routes)
+└── scripts/
+    └── e2e/                         # ★ Phase 4: E2E シナリオ (up / register-login / chat / auth-failures / down)
 ```
 
-> `docker-compose.yml` は **使わない**。Phase 1〜3 は `go run` + `docker run postgres/redis` でローカル開発、Phase 4 で kind に引っ越す。
+> **本番向け K8s マニフェスト (`deploy/`, Helm chart 等) は本リポジトリに存在しない**。infra リポジトリが責務を持つ。
+>
+> `compose.yaml` / `envoy.yaml` はあくまで **dev / E2E 専用の軽量 stack**。永続ボリュームや HA や Observability は持たない — それらは infra 側。
 
 ---
 
@@ -91,23 +63,23 @@ go-microservices-chat/
 services/user-service/
 ├── go.mod                           # サービス固有の依存
 ├── go.sum
-├── Dockerfile                       # multi-stage build
+├── Dockerfile                       # multi-stage build (Phase 3)
 ├── cmd/
 │   └── server/main.go               # DI 組み立て + gRPC サーバー起動
 ├── internal/
 │   ├── config/
-│   │   └── config.go                # 環境変数読み込み (K8s Secret 由来)
+│   │   └── config.go                # 環境変数読み込み
 │   └── user/                        # ★ 垂直分割の本体
 │       ├── user.go                  # エンティティ + ドメインエラー
 │       ├── service.go               # ビジネスロジック
 │       ├── repository.go            # Repository interface + PostgreSQL 実装
+│       ├── repository_inmem.go      # テスト用 InMem 実装
 │       ├── grpc_server.go           # proto ↔ domain 変換 + RPC ハンドラ
-│       ├── auth.go                  # bcrypt / JWT 発行 (Phase 1)
+│       ├── auth.go                  # bcrypt + JWT Issuer 呼び出し
 │       └── *_test.go
-└── migrations/                      # SQL (K8s Job で実行)
+└── migrations/                      # SQL (infra 側の migration runner が実行)
     ├── 001_create_users.up.sql
-    ├── 002_add_password_hash.up.sql
-    └── 003_create_refresh_tokens.up.sql
+    └── 002_create_refresh_tokens.up.sql
 ```
 
 ### 複数ドメインが同居するサービスのバリエーション (chat-service)
@@ -119,18 +91,21 @@ services/chat-service/
 ├── cmd/server/main.go
 ├── internal/
 │   ├── config/
-│   ├── room/                       # Room 集約 (rooms / room_members)
+│   ├── room/                        # Room 集約 (rooms / room_members)
 │   │   ├── room.go
-│   │   ├── service.go              # Create/Get/List/Search/Join/Leave/EnsureMember
-│   │   ├── repository.go
+│   │   ├── service.go               # Create/Get/List/Search/Join/Leave/EnsureMember
+│   │   ├── repository.go / repository_inmem.go
 │   │   └── *_test.go
-│   ├── message/                    # Message 集約 (messages)
+│   ├── message/                     # Message 集約 (messages, Phase 2 で追加)
 │   │   ├── message.go
-│   │   ├── service.go              # Send/GetMessages
-│   │   ├── repository.go
+│   │   ├── service.go               # Send/GetMessages
+│   │   ├── repository.go / repository_inmem.go
 │   │   └── *_test.go
-│   └── grpc/                       # ★ ChatServiceServer を一本化
-│       └── server.go               # proto↔domain 変換 + 横断認可
+│   ├── userclient/                  # user-service 呼び出し (member enrich)
+│   │   ├── client.go
+│   │   └── fake.go                  # テスト用
+│   └── grpc/                        # ★ ChatServiceServer を一本化
+│       └── server.go                # proto↔domain 変換 + 横断認可
 └── migrations/
 ```
 
@@ -152,11 +127,10 @@ services/chat-service/
 
 | Phase | 追加されるパッケージ・ファイル | 備考 |
 |-------|----------------------|------|
-| 0 | `go.work` / `proto/buf.yaml` / `Makefile` / `gen/go/` | 骨組みのみ。`services/` `deploy/` は空 |
-| 1 | `services/user-service/internal/user/`, `pkg/auth/`, `pkg/interceptor/` | 認証 + プロフィール管理を垂直分割で集約 |
-| 2 | `services/chat-service/internal/room/`, `internal/message/`, `internal/grpc/`, `proto/chat/v1/` | 2 つのドメイン + gRPC トランスポート束ね層 (下記補足) |
-| 3 | `services/realtime-service/internal/hub/`, `internal/pubsub/`, `internal/ws/` | WebSocket ハブ + Redis Pub/Sub + 接続管理 |
-| 4 | `deploy/` 配下の全 YAML | K8s マニフェスト + Envoy Gateway 設定 |
+| 1 | `go.work` / `proto/` + `gen/go/` / `pkg/auth/` + `pkg/interceptor/` / `services/user-service/` / `services/chat-service/internal/{room,userclient,grpc}/` | user 機能 (JWT 発行 + JWKS 配信) + Room 機能を実装。**JWT 検証ロジックは書かない** |
+| 2 | `services/chat-service/internal/message/` / `services/realtime-service/` (hub / pubsub / chatclient / ws) | Message + realtime-service (WebSocket + Redis Pub/Sub)。最初から Pub/Sub 採用 |
+| 3 | 3 サービスの `Dockerfile` | distroless + multi-stage build |
+| 4 | `compose.yaml` / `envoy.yaml` / `scripts/e2e/*.sh` | dev / E2E 専用 stack。Envoy standalone 経由で JWT 検証経路まで含む全フローを確認 |
 
 ---
 
@@ -196,34 +170,22 @@ func main() {
     pool, _ := pgxpool.New(ctx, cfg.DBURL)
 
     userRepo   := user.NewPostgresRepository(pool)
-    userSvc    := user.NewService(userRepo)
+    issuer     := auth.NewIssuer(cfg.JWTPrivateKey, cfg.JWTKeyID)
+    userSvc    := user.NewService(userRepo, issuer)
     userServer := user.NewGRPCServer(userSvc)
 
     grpcSrv := grpc.NewServer(
         grpc.ChainUnaryInterceptor(
             interceptor.Logging(logger),
-            interceptor.Recovery(),
-            interceptor.TrustedUserID(),  // Phase 1 から使う (JWT 検証は Envoy)
         ),
     )
     userv1.RegisterUserServiceServer(grpcSrv, userServer)
+    // ハンドラは auth.RequesterID(ctx) で呼び出し元を取得 (infra 側 Envoyが x-user-id を注入)
 
     lis, _ := net.Listen("tcp", cfg.GRPCAddr)
     grpcSrv.Serve(lis)
 }
 ```
-
----
-
-## deploy/ の役割
-
-すべての K8s リソースをここに集約する。環境 (dev/prod) を分けたい場合は Kustomize overlays で `deploy/overlays/dev/` 等を足す (本プロジェクトでは dev のみ)。
-
-### なぜ Helm ではなく素の YAML か
-
-- **学習向け**: 生の K8s リソースを読んで書ける方が身につく
-- Envoy Gateway のインストールのみ Helm を使う (公式チャート経由)
-- Phase が進んだら Helm chart 化する発展課題はあり
 
 ---
 
@@ -236,10 +198,30 @@ use (
     ./gen/go
     ./pkg
     ./services/user-service       // Phase 1 で追加
-    ./services/chat-service        // Phase 2 で追加
-    ./services/realtime-service    // Phase 3 で追加
+    ./services/chat-service        // Phase 1 で追加 (Room) / Phase 2 で Message 拡張
+    ./services/realtime-service    // Phase 2 で追加
 )
 ```
+
+---
+
+## infra リポジトリとの境界
+
+このリポジトリが責任を持つもの:
+
+- Go サービス実装
+- proto 定義
+- Dockerfile (Phase 3)
+- **dev / E2E 用の `compose.yaml` + `envoy.yaml` + `scripts/e2e/*.sh`** (Phase 4)
+- 単体テスト (外部依存ゼロで PASS) + E2E (手元で JWT 検証経路まで)
+
+このリポジトリで **やらない** もの (infra repo の責務):
+
+- 本番向け K8s manifest / Helm chart (Deployment / StatefulSet / Gateway API / SecurityPolicy / NetworkPolicy)
+- TLS 証明書 / 本番 JWT 鍵の管理
+- 永続ボリューム / HA / 自動 failover
+- 本番 migration runner (compose では手動スクリプトで代用)
+- Rate Limit / Observability / CI/CD pipeline
 
 ---
 
