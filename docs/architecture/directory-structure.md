@@ -69,13 +69,12 @@ services/user-service/
 ├── internal/
 │   ├── config/
 │   │   └── config.go                # 環境変数読み込み
-│   └── user/                        # ★ 垂直分割の本体
+│   └── user/                        # ★ 垂直分割: ドメインに必要な全てが同居
 │       ├── user.go                  # エンティティ + ドメインエラー
-│       ├── service.go               # ビジネスロジック
+│       ├── service.go               # ビジネスロジック (bcrypt + pkg/auth.Issuer 呼び出しもここ)
 │       ├── repository.go            # Repository interface + PostgreSQL 実装
 │       ├── repository_inmem.go      # テスト用 InMem 実装
-│       ├── grpc_server.go           # proto ↔ domain 変換 + RPC ハンドラ
-│       ├── auth.go                  # bcrypt + JWT Issuer 呼び出し
+│       ├── grpc.go                  # GRPCAdapter (proto ↔ domain 変換 + RPC ハンドラ)
 │       └── *_test.go
 └── migrations/                      # SQL (infra 側の migration runner が実行)
     ├── 001_create_users.up.sql
@@ -84,10 +83,13 @@ services/user-service/
 
 ### 複数ドメインが同居するサービスのバリエーション (chat-service)
 
-chat-service は **1 つの gRPC サービス (`ChatService`) に Room と Message の RPC が両方含まれる** ため、トランスポート層を `internal/grpc/` に切り出して両ドメインを束ねる。
+chat-service は proto 側で **1 つの gRPC サービス (`ChatService`) に Room と Message の RPC が両方含まれる**。
+Go で生成される `ChatServiceServer` interface は 1 つなので、最終的に登録される struct も 1 つ必要。
+**Phase 1 時点では Room のみ** なので `room.GRPCAdapter` が単独でその役を担う (Message 系 RPC は埋め込んだ `UnimplementedChatServiceServer` のデフォルト応答)。
+**Phase 2 で Message が加わる**時に初めて `internal/grpc/` を新設し、`room.GRPCAdapter` + `message.GRPCAdapter` を埋め込んだ薄い合流 struct を置く。
 
 ```
-services/chat-service/
+services/chat-service/                # Phase 1 時点 (Room のみ)
 ├── cmd/server/main.go
 ├── internal/
 │   ├── config/
@@ -95,31 +97,36 @@ services/chat-service/
 │   │   ├── room.go
 │   │   ├── service.go               # Create/Get/List/Search/Join/Leave/EnsureMember
 │   │   ├── repository.go / repository_inmem.go
+│   │   ├── grpc.go                  # GRPCAdapter (ChatServiceServer を単独で満たす)
 │   │   └── *_test.go
-│   ├── message/                     # Message 集約 (messages, Phase 2 で追加)
-│   │   ├── message.go
-│   │   ├── service.go               # Send/GetMessages
-│   │   ├── repository.go / repository_inmem.go
-│   │   └── *_test.go
-│   ├── userclient/                  # user-service 呼び出し (member enrich)
-│   │   ├── client.go
-│   │   └── fake.go                  # テスト用
-│   └── grpc/                        # ★ ChatServiceServer を一本化
-│       └── server.go                # proto↔domain 変換 + 横断認可
+│   └── userclient/                  # user-service 呼び出し (member enrich)
+│       ├── client.go
+│       └── fake.go                  # テスト用
 └── migrations/
+
+# Phase 2 以降の追加構造 (Message ドメインが加わる時)
+├── internal/message/                # Message 集約
+│   ├── message.go
+│   ├── service.go
+│   ├── grpc.go                      # GRPCAdapter (Message RPC のみ)
+│   └── *_test.go
+└── internal/grpc/                   # 薄い合流層
+    └── server.go                    # *room.GRPCAdapter + *message.GRPCAdapter を embed
 ```
 
 **ルール**:
 
-- 1 つのドメインに閉じる RPC は、そのドメインパッケージに `grpc_server.go` を置いてよい (user-service のパターン)
-- 1 つの gRPC サービスに**複数ドメインの RPC が同居** する場合のみ、`internal/grpc/` にまとめる (chat-service のパターン)
+- **grpc.go はドメインパッケージと同居させる**。repository.go と同じ扱いで、ドメインに関する全てが 1 パッケージに閉じる (垂直分割の純化)
+- proto 型の import はドメインパッケージ内で許容する。**ただし service.go (業務ロジック) は proto に触れない** — proto は grpc.go 側に閉じ込める
+- `UnimplementedXxxServer` の埋め込みはいずれかのアダプタ 1 つに置く (forward-compat のため。複数に置くと depth ambiguity で合流層が壊れる)
+- 1 proto service / 1 ドメインなら grpc.go 単独 (user-service パターン)。複数ドメイン跨ぎなら薄い `internal/grpc/` 合流層 (chat-service Phase 2 パターン)
 
 ### 垂直分割を採用する理由
 
 | 観点 | 水平分割 (`handler/service/repository/`) | 垂直分割 (`user/`, `room/`) |
 |------|-----------------------------------------|-------------------------------|
 | 1 機能の変更範囲 | 3 フォルダに散らばる | 1 パッケージに閉じる |
-| 呼び出し側の読み心地 | `handler.UserHandler` (冗長) | `user.Server` (Go 標準ライブラリ風) |
+| 呼び出し側の読み心地 | `handler.UserHandler` (冗長) | `user.GRPCAdapter` (Go 標準ライブラリ風) |
 | Go コミュニティの傾向 | レイヤードアーキテクチャ文脈で採用 | Ben Johnson "Standard Package Layout" で推奨 |
 | このプロジェクトでの選択 | — | **採用** (Go 標準ライブラリのイディオムに合わせる) |
 
@@ -127,8 +134,8 @@ services/chat-service/
 
 | Phase | 追加されるパッケージ・ファイル | 備考 |
 |-------|----------------------|------|
-| 1 | `go.work` / `proto/` + `gen/go/` / `pkg/auth/` + `pkg/interceptor/` / `services/user-service/` / `services/chat-service/internal/{room,userclient,grpc}/` | user 機能 (JWT 発行 + JWKS 配信) + Room 機能を実装。**JWT 検証ロジックは書かない** |
-| 2 | `services/chat-service/internal/message/` / `services/realtime-service/` (hub / pubsub / chatclient / ws) | Message + realtime-service (WebSocket + Redis Pub/Sub)。最初から Pub/Sub 採用 |
+| 1 | `go.work` / `proto/` + `gen/go/` / `pkg/auth/` + `pkg/interceptor/` / `services/user-service/` / `services/chat-service/internal/{room,userclient}/` | user 機能 (JWT 発行 + JWKS 配信) + Room 機能を実装。**JWT 検証ロジックは書かない** |
+| 2 | `services/chat-service/internal/message/` + `internal/grpc/` 合流層 / `services/realtime-service/` (hub / pubsub / chatclient / ws) | Message + realtime-service (WebSocket + Redis Pub/Sub)。最初から Pub/Sub 採用 |
 | 3 | 3 サービスの `Dockerfile` | distroless + multi-stage build |
 | 4 | `compose.yaml` / `envoy.yaml` / `scripts/e2e/*.sh` | dev / E2E 専用 stack。Envoy standalone 経由で JWT 検証経路まで含む全フローを確認 |
 
@@ -140,23 +147,23 @@ services/chat-service/
 
 ```
 ┌─────────────────────────────────┐
-│ grpc_server.go                   │  ← トランスポート層
-│   - proto ↔ domain 変換          │     リクエスト検証 / gRPC エラーコード変換
+│ grpc.go                          │  ← トランスポート層
+│   - GRPCAdapter (proto ↔ domain 変換) │   リクエスト検証 / gRPC エラーコード変換
 ├─────────────────────────────────┤
 │ service.go                       │  ← ビジネスロジック層
-│   - ドメインルール (重複禁止など) │     トランスポート非依存
+│   - ドメインルール (重複禁止など) │     トランスポート非依存 (proto を import しない)
 ├─────────────────────────────────┤
 │ repository.go                    │  ← データアクセス層
 │   - PostgreSQL 実装              │     interface で抽象化
 ├─────────────────────────────────┤
-│ user.go                          │  ← ドメイン層
+│ user.go / room.go                │  ← ドメイン層
 │   - エンティティ / エラー型      │     他のどの層にも依存しない
 └─────────────────────────────────┘
 ```
 
-**依存の方向**: `grpc_server → service → repository (interface) → domain`
+**依存の方向**: `grpc.go → service.go → repository.go (interface) → domain`
 
-同じパッケージ内なので **import は発生しない**。ファイルの役割分担として層を保つ。
+同じパッケージ内なので **import は発生しない**。ファイルの役割分担として層を保つ (= 垂直分割内での水平層構造)。
 
 ---
 
@@ -169,17 +176,17 @@ func main() {
     cfg := config.Load()
     pool, _ := pgxpool.New(ctx, cfg.DBURL)
 
-    userRepo   := user.NewPostgresRepository(pool)
-    issuer     := auth.NewIssuer(cfg.JWTPrivateKey, cfg.JWTKeyID)
-    userSvc    := user.NewService(userRepo, issuer)
-    userServer := user.NewGRPCServer(userSvc)
+    userRepo    := user.NewPostgresRepository(pool)
+    issuer      := auth.NewIssuer(cfg.JWTPrivateKey, cfg.JWTKeyID)
+    userSvc     := user.NewService(userRepo, issuer)
+    userAdapter := user.NewGRPCAdapter(userSvc)
 
     grpcSrv := grpc.NewServer(
         grpc.ChainUnaryInterceptor(
             interceptor.Logging(logger),
         ),
     )
-    userv1.RegisterUserServiceServer(grpcSrv, userServer)
+    userv1.RegisterUserServiceServer(grpcSrv, userAdapter)
     // ハンドラは auth.RequesterID(ctx) で呼び出し元を取得 (infra 側 Envoyが x-user-id を注入)
 
     lis, _ := net.Listen("tcp", cfg.GRPCAddr)

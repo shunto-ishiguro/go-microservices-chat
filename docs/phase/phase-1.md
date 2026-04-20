@@ -10,7 +10,7 @@ go-microservices-chat/
 ├── proto/                              # ★ Phase 1 で新規
 │   ├── buf.yaml
 │   ├── buf.gen.yaml
-│   ├── user/v1/user.proto              # Register/Login/Refresh/GetUser/UpdateUser
+│   ├── user/v1/user.proto              # Register/Login/Refresh/GetMe/UpdateMe/GetUser (REST) + BatchGetUsers (内部)
 │   └── chat/v1/chat.proto              # Room 系 RPC のみ (Message は Phase 2)
 ├── gen/go/                             # buf generate 出力
 │   ├── user/v1/
@@ -29,10 +29,10 @@ go-microservices-chat/
 │   │   │   ├── config/config.go
 │   │   │   └── user/
 │   │   │       ├── user.go             # エンティティ + ドメインエラー
-│   │   │       ├── service.go          # Register/Login/Refresh/GetUser/UpdateUser
+│   │   │       ├── service.go          # Register/Login/Refresh/GetMe/UpdateMe/GetUser/BatchGetUsers
 │   │   │       ├── repository.go       # Repository interface + PostgreSQL 実装
 │   │   │       ├── repository_inmem.go # インメモリ実装 (テスト用)
-│   │   │       ├── grpc_server.go      # proto↔domain 変換 + RPC ハンドラ
+│   │   │       ├── grpc.go             # GRPCAdapter (proto↔domain 変換 + RPC ハンドラ)
 │   │   │       └── *_test.go
 │   │   ├── migrations/
 │   │   │   ├── 001_create_users.up.sql / down.sql
@@ -47,12 +47,11 @@ go-microservices-chat/
 │       │   │   ├── service.go          # Create/Get/List/Search/Join/Leave/EnsureMember
 │       │   │   ├── repository.go       # Repository interface + PostgreSQL 実装
 │       │   │   ├── repository_inmem.go
+│       │   │   ├── grpc.go             # GRPCAdapter (ChatServiceServer を単独で満たす)
 │       │   │   └── *_test.go
-│       │   ├── userclient/
-│       │   │   ├── client.go           # user-service 呼び出し (member enrich)
-│       │   │   └── fake.go             # テスト用 fake
-│       │   └── grpc/
-│       │       └── server.go           # ChatServiceServer (Room 部分のみ)
+│       │   └── userclient/
+│       │       ├── client.go           # user-service 呼び出し (member enrich)
+│       │       └── fake.go             # テスト用 fake
 │       ├── migrations/
 │       │   ├── 001_create_rooms.up.sql / down.sql
 │       │   └── 002_create_room_members.up.sql / down.sql
@@ -68,7 +67,23 @@ go-microservices-chat/
 
 ## スコープ
 
-Go Workspace 骨組みから始め、`pkg/auth/` (JWT **発行** + JWKS 配信 + RequesterID) → user-service (Register/Login/Refresh/GetUser/UpdateUser) → chat-service (Room CRUD + Join/Leave) まで実装する。**アプリ側で JWT 検証は行わない** — `x-user-id` メタデータを信じて読むだけ。テストは metadata を直接注入して行う。
+Go Workspace 骨組みから始め、`pkg/auth/` (JWT **発行** + JWKS 配信 + RequesterID) → user-service (Register/Login/Refresh/GetMe/UpdateMe/GetUser) → chat-service (Room CRUD + Join/Leave) まで実装する。**アプリ側で JWT 検証は行わない** — `x-user-id` メタデータを信じて読むだけ。テストは metadata を直接注入して行う。
+
+### API の画面マッピング方針
+
+`/me` 系 (自分のプロフィール参照・更新) と他ユーザー参照を **gRPC レベルで別 RPC** に分ける:
+
+| RPC | 用途 | REST 公開 |
+|-----|------|----------|
+| `GetMe` / `UpdateMe` | 画面 #7 (自分のプロフィール)。対象 ID は `x-user-id` から解決 | ✅ `/api/v1/users/me` |
+| `GetUser(user_id)` | 画面 #8 (メンバー詳細モーダル) — 他人 **1 件** 取得 | ✅ `/api/v1/users/:id` |
+| `BatchGetUsers([]user_ids)` | chat-service の `ListRoomMembers` メンバー一覧 enrich — 他人 **N 件** を 1 回で | ❌ (内部 RPC) |
+
+これにより `/me` の表現で `user_id="me"` のようなマジックストリングが不要になり、`UpdateMe` は型レベルで「他人は触れない」ことが保証される (リソース所有者認可の実行時チェックが不要)。
+
+### N+1 回避のバッチ
+
+`ListRoomMembers` でメンバー一覧を enrich する時、各メンバーごとに `GetUser` を呼ぶと **メンバー数 N に比例して gRPC 呼び出しが増える (N+1 問題)**。user-service 側に `BatchGetUsers([]user_ids)` を用意し、chat-service は `ListRoomMembers` 内で ID を 1 配列にまとめて **1 回** で取得する。同じ仕組みを Phase 2 の Message の sender enrich にも使い回す。なお `GetRoom` は enrich 不要な軽量レスポンス (ヘッダのみ) なので、そもそも BatchGetUsers を呼ばない。
 
 ### JWT に関する責務の切り分け
 
@@ -109,8 +124,14 @@ Go Workspace 骨組みから始め、`pkg/auth/` (JWT **発行** + JWKS 配信 +
 
 ### ステップ 2: proto 定義
 
-- [ ] `proto/user/v1/user.proto`: Register / Login / Refresh / GetUser / UpdateUser (+ `google.api.http` アノテーション)
-- [ ] `proto/chat/v1/chat.proto`: CreateRoom / GetRoom / ListRooms / SearchRooms / JoinRoom / LeaveRoom (Message 系はまだ書かない)
+- [ ] `proto/user/v1/user.proto`:
+  - REST 公開 (`google.api.http` あり): Register / Login / Refresh / GetMe / UpdateMe / GetUser
+  - 内部 RPC (アノテーションなし): BatchGetUsers([]user_ids)
+- [ ] `proto/chat/v1/chat.proto`:
+  - `Room` はヘッダ軽量情報 (id, name, created_by, member_count, created_at) のみ。メンバー配列は持たない
+  - `RoomMember` に `display_name` / `avatar_url` を追加 (ListRoomMembers のレスポンスで enrich)
+  - `ListRoomMembers(room_id, limit, cursor)` を追加 (画面 #9 用)
+- [ ] `proto/chat/v1/chat.proto`: CreateRoom / GetRoom (軽量) / ListRooms / SearchRooms / JoinRoom / LeaveRoom / ListRoomMembers (enrich 付き) (Message 系はまだ書かない)
 - [ ] `buf generate` で `gen/go/user/v1/` と `gen/go/chat/v1/`
 
 **確認ポイント**: `user.pb.go` / `user_grpc.pb.go` / `chat.pb.go` / `chat_grpc.pb.go` が生成される。
@@ -205,15 +226,18 @@ func RequesterID(ctx context.Context) (string, bool) {
 
 ### ステップ 7: ビジネスロジック + gRPC ハンドラ
 
-- [ ] `internal/user/service.go`: Register (bcrypt) / Login (GetByEmail → bcrypt 検証 → Issuer) / Refresh (ローテーション) / GetUser / UpdateUser (リソース所有者認可)
-- [ ] `internal/user/grpc_server.go`: proto↔domain 変換 + エラーマッピング
-- [ ] `UpdateUser` で `auth.RequesterID(ctx) != targetID` なら `PermissionDenied`
+- [ ] `internal/user/service.go`: Register (bcrypt) / Login (GetByEmail → bcrypt 検証 → Issuer) / Refresh (ローテーション) / GetMe / UpdateMe / GetUser / BatchGetUsers
+- [ ] `internal/user/repository.go`: `GetUsersByIDs([]ids)` を追加 (`WHERE id = ANY($1)` で 1 クエリ)
+- [ ] `internal/user/grpc.go`: `GRPCAdapter` 型 + proto↔domain 変換 + エラーマッピング (UnimplementedUserServiceServer を embed)
+- [ ] `GetMe` / `UpdateMe` は `auth.RequesterID(ctx)` から対象 ID を解決する (引数に取らない)
+- [ ] `x-user-id` が無い状態で `GetMe` / `UpdateMe` を呼ぶと `Unauthenticated`
+- [ ] `BatchGetUsers` は存在しない ID を結果から欠落させる (部分成功を許容、エラーにしない)
 
 **確認ポイント**: bufconn テストで以下が通る:
 - Register → Login で JWT が返る
 - Login の JWT を [jwt.io](https://jwt.io/) で眺めると `sub=user-uuid`, `iss=chat-app`
-- metadata に `x-user-id` を注入した bufconn コンテキストで GetUser / UpdateUser が通る
-- 別 user の id で UpdateUser を呼ぶと `PermissionDenied`
+- metadata に `x-user-id` を注入した bufconn コンテキストで GetMe / UpdateMe / GetUser が通る
+- `x-user-id` 無しで `GetMe` を呼ぶと `Unauthenticated`
 
 ---
 
@@ -241,14 +265,23 @@ func RequesterID(ctx context.Context) (string, bool) {
 
 ---
 
-### ステップ 10: `internal/grpc/server.go` + userclient
+### ステップ 10: `internal/room/grpc.go` + userclient
 
-- [ ] `internal/grpc/server.go`: `ChatServiceServer` の Room 部分を実装 (Message は Phase 2 で `UnimplementedChatServiceServer` 由来の `Unimplemented` のままで OK)
-- [ ] `internal/userclient/client.go`: `grpc.Dial(os.Getenv("USER_SERVICE_ADDR"))` で長寿命接続、`GetRoom` の member enrich に使う
-- [ ] `internal/userclient/fake.go`: テスト用
-- [ ] `GetRoom` で `x-user-id` を下流に metadata 伝搬 (`metadata.AppendToOutgoingContext`)
+- [ ] `internal/room/grpc.go`: `room.GRPCAdapter` が `ChatServiceServer` の Room 部分を実装 (Message は Phase 2 で `UnimplementedChatServiceServer` 由来の `Unimplemented` のままで OK)
+- [ ] `GetRoom` 実装: **enrich しない軽量レスポンス** (id, name, created_by, member_count, created_at)。メンバー数は `CountMembers` で軽く取る
+- [ ] `ListRoomMembers` 実装:
+  - `room.Service.ListRoomMembers` でメンバー行を取得
+  - メンバー ID を集めて `userClient.BatchGetUsers([]ids)` を **1 回** 呼ぶ (N+1 回避)
+  - 結果を `user_id → Profile` の map にして `RoomMember.display_name` / `avatar_url` に差し込む
+  - profile が無い member は user_id と joined_at のみ返す (部分成功)
+- [ ] `internal/userclient/client.go`: `grpc.Dial(os.Getenv("USER_SERVICE_ADDR"))` で長寿命接続。`GetUser` と `BatchGetUsers` を expose
+- [ ] `internal/userclient/fake.go`: テスト用。`Set(*Profile)` でシード、`GetUser` / `BatchGetUsers` どちらでも引ける
+- [ ] `auth.PropagateRequester(ctx)` で `x-user-id` を下流 (user-service) に伝搬
 
-**確認ポイント**: bufconn + fake userclient で `CreateRoom` → `JoinRoom` → `GetRoom` が動く。
+**確認ポイント**: bufconn + fake userclient で以下が通る:
+- `CreateRoom` → `JoinRoom` → `GetRoom` が動く (レスポンスは member_count のみ、メンバー配列は無い)
+- `ListRoomMembers` のレスポンスで各 member に `display_name` / `avatar_url` が入っている (fake に profile を seed してあれば)
+- profile が無い member は user_id のみ返る (部分成功)
 
 ---
 
@@ -267,8 +300,8 @@ func RequesterID(ctx context.Context) (string, bool) {
 - [ ] `go test ./...` が **DB / 他プロセス無しで** PASS (InMem Repository + fake userclient で)
 - [ ] user-service の Login RPC が RS256 署名の JWT を返す
 - [ ] user-service の `/.well-known/jwks.json` が公開鍵を JWKS 形式で返す (curl で確認可能)
-- [ ] `x-user-id` metadata を注入した bufconn で GetUser / UpdateUser / Room 系が動く
-- [ ] 他人の UpdateUser で `PermissionDenied` (リソース所有者認可)
+- [ ] `x-user-id` metadata を注入した bufconn で GetMe / UpdateMe / GetUser / Room 系が動く
+- [ ] `x-user-id` 無しで `GetMe` / `UpdateMe` を呼ぶと `Unauthenticated` (他人を書き換える経路自体が存在しない)
 
 ### リクエスト処理のフロー (Phase 1 完了時のイメージ)
 
@@ -293,14 +326,14 @@ sequenceDiagram
     participant Ch as chat-service (app)
     participant U as user-service (app)
 
-    C->>E: gRPC + Authorization: Bearer <JWT>
+    C->>E: gRPC ListRoomMembers + Authorization: Bearer <JWT>
     E->>E: キャッシュした公開鍵で JWT 検証<br/>(署名 / exp / iss)
     E->>E: claims.sub → x-user-id に変換
-    E->>Ch: gRPC + metadata{x-user-id: alice-uuid}
+    E->>Ch: gRPC ListRoomMembers + metadata{x-user-id: alice-uuid}
     Ch->>Ch: auth.RequesterID(ctx) で読み出し<br/>(再検証しない)
-    Ch->>U: gRPC GetUser + x-user-id 伝搬
-    U-->>Ch: User (member enrich 用)
-    Ch-->>E: response
+    Ch->>U: gRPC BatchGetUsers([id1, id2, ...])<br/>+ x-user-id 伝搬
+    U-->>Ch: [User1, User2, ...] (N+1 回避の一括取得)
+    Ch-->>E: ListRoomMembersResponse (enrich 済み)
     E-->>C: response
 ```
 

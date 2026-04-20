@@ -27,6 +27,8 @@
 | 5 | 自分の参加ルーム一覧 | ホーム画面 (ログイン後の起点) |
 | 6 | チャット | メッセージ送受信 |
 | 7 | ユーザー編集 | 自分のプロフィール更新 |
+| 8 | メンバー詳細 | 他ユーザーのプロフィール表示 (#9 でアイコンタップ → モーダル or 画面) |
+| 9 | ルームメンバー一覧 | そのルームのメンバー全員を表示 (#6 のヘッダ/メニューから遷移) |
 
 ---
 
@@ -39,12 +41,14 @@
 | 3 | 公開ルームを探す | REST `GET /api/v1/rooms/search?q=` | **参加ボタン**: REST `POST /api/v1/rooms/:id/join` |
 | 4 | ルーム作成 | — | **作成ボタン**: REST `POST /api/v1/rooms` → 作成されたルームを返すので自動で #6 チャットへ遷移 |
 | 5 | 自分の参加ルーム一覧 | REST `GET /api/v1/rooms` (自分のメンバーシップのみ) | — (ルームクリックで #6 へ) |
-| 6 | チャット | REST `GET /api/v1/rooms/:id` + REST `GET /api/v1/rooms/:id/messages` + **WebSocket 接続** + WS `subscribe` | **送信**: WS `send_message` / **退出ボタン**: REST `DELETE /api/v1/rooms/:id/members/me` |
+| 6 | チャット | REST `GET /api/v1/rooms/:id` (ヘッダのみ) + REST `GET /api/v1/rooms/:id/messages` + **WebSocket 接続** + WS `subscribe` | **送信**: WS `send_message` / **退出ボタン**: REST `DELETE /api/v1/rooms/:id/members/me` / **メンバー一覧ボタン**: #9 へ |
 | 7 | ユーザー編集 | REST `GET /api/v1/users/me` | **保存**: REST `PUT /api/v1/users/me` |
+| 8 | メンバー詳細 | REST `GET /api/v1/users/:id` | — (閉じるだけ) |
+| 9 | ルームメンバー一覧 | REST `GET /api/v1/rooms/:id/members` | **メンバーアイコンタップ**: #8 へ |
 
 ### 共通ヘッダー操作
 
-- **ログアウト**: REST `POST /api/v1/auth/logout` → #1 へ
+- **ログアウト**: クライアント側でトークンを破棄して #1 へ (Phase 1 ではサーバー側 revoke は行わない)
 
 ### WebSocket で push されるもの (チャット画面 #6 に表示)
 
@@ -62,8 +66,14 @@
                      ┌──────────────┼──────────────┐       │
                      ↓              ↓              ↓       │
               [3] ルーム探す  [4] ルーム作成  [6] チャット ─退出┘
-                     │              │              ↑
-                     └──参加────────┴──作成完了────┘
+                     │              │              │ ↑
+                     └──参加────────┴──作成完了────┘ │
+                                                   │
+                              [6] チャット ──メンバー一覧ボタン──→ [9] メンバー一覧
+                                                                       │
+                                                              メンバーアイコンタップ
+                                                                       ↓
+                                                                 [8] メンバー詳細
 
 どの画面からも → [7] ユーザー編集 / ログアウト
 ```
@@ -76,10 +86,13 @@
 
 | 種別 | エンドポイント/RPC |
 |------|-------------------|
-| 認証 | `Register` / `Login` / `Refresh` / `Logout` |
-| プロフィール | `GetUser` / `UpdateUser` |
+| 認証 | `Register` / `Login` / `Refresh` |
+| 自分のプロフィール (REST 公開、画面 #7) | `GetMe` / `UpdateMe` |
+| 他ユーザー 1 件取得 (REST 公開、画面 #8) | `GetUser(user_id)` |
+| 他ユーザー N 件一括 (内部 RPC、REST 非公開) | `BatchGetUsers([]user_ids)` — chat-service のメンバー enrich で使う (N+1 回避) |
 
 **消える**:
+- `Logout` (DB にリフレッシュトークンを revoke するだけの内部機能は Phase 1 スコープ外)
 - `SearchUsers` (ユーザー単体検索の画面なし)
 - `ListFriends` / `SendFriendRequest` / `AcceptFriendRequest` (friends 機能なし)
 
@@ -87,8 +100,8 @@
 
 | 種別 | RPC |
 |------|-----|
-| ルーム管理 | `CreateRoom` / `GetRoom` / `ListRooms` / `SearchRooms` |
-| 参加管理 | `JoinRoom` / `LeaveRoom` |
+| ルーム管理 | `CreateRoom` / `GetRoom` (軽量ヘッダのみ) / `ListRooms` / `SearchRooms` |
+| メンバー管理 | `JoinRoom` / `LeaveRoom` / `ListRoomMembers` (画面 #9) |
 | メッセージ履歴 | `GetMessages` |
 | 内部 (WS 経由) | `SendMessage` |
 

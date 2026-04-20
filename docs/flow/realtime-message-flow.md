@@ -122,9 +122,9 @@ realtime-svc ─┤
 gRPC Unary の保存経路。これは永続化だけの責務。
 
 ```go
-// services/chat-service/internal/grpc/chat_server.go
-func (s *ChatServer) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
-    msg := s.repo.Insert(ctx, req)   // PostgreSQL に永続化
+// services/chat-service/internal/message/grpc.go
+func (a *GRPCAdapter) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
+    msg := a.svc.Send(ctx, req)   // PostgreSQL に永続化
     return &chatv1.SendMessageResponse{Message: toProto(msg)}, nil
 }
 ```
