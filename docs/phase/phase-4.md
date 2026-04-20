@@ -7,15 +7,16 @@
 ```
 go-microservices-chat/
 ├── compose.yaml                    # ★ dev / E2E 専用 (本番向けではない)
-├── envoy.yaml                      # ★ Envoy standalone 設定 (JWT filter + routes)
+├── envoy.yaml                      # ★ Envoy standalone 設定 (JWT filter + routes + grpc_json_transcoder)
+├── descriptor.pb                   # ★ Envoy transcoder が読むディスクリプタ (.gitignore)
 ├── scripts/
 │   └── e2e/                        # ★ E2E シナリオ
-│       ├── 00-up.sh                # compose up -d + migration 流し込み
+│       ├── 00-up.sh                # descriptor 再生成 + compose up -d + migration 流し込み
 │       ├── 01-register-login.sh    # 認証 golden path
 │       ├── 02-chat.sh              # WebSocket + 2 インスタンス間 Pub/Sub
 │       ├── 03-auth-failures.sh     # JWT 無し / 期限切れ / 改ざん / 他人更新
 │       └── 99-down.sh              # compose down -v
-└── Makefile                        # e2e-up / e2e-run / e2e-down ターゲットを追加
+└── Makefile                        # descriptor / e2e-up / e2e-run / e2e-down ターゲットを追加
 ```
 
 > 本番向けの K8s マニフェスト / Gateway API / SecurityPolicy / NetworkPolicy 等は **infra リポジトリ側の責務** であり、このリポジトリには追加しない。ここの `compose.yaml` / `envoy.yaml` はあくまで **dev / 動作検証専用** の軽量 stack。
@@ -25,6 +26,8 @@ go-microservices-chat/
 ## スコープ
 
 Phase 3 でビルドした Docker イメージを **実際に起動し、JWT 検証経路を含む全フローが通ることを確認する**。`docker compose up --scale realtime-service=2` で Redis Pub/Sub によるプロセス間配信も同時に検証する。
+
+また Envoy の **HTTP/JSON ⇄ gRPC 変換** (`grpc_json_transcoder` filter) をここで初めて導入する。そのための前提 artifact として **`descriptor.pb`** (`.proto` をバイナリ化した FileDescriptorSet) を `buf build` で生成する。
 
 **前提**: Phase 3 完了 (3 サービスのイメージが `docker image ls` にある)。
 
@@ -52,9 +55,9 @@ Phase 3 でビルドした Docker イメージを **実際に起動し、JWT 検
 
 | 部 | テーマ | ステップ |
 |----|--------|----------|
-| A | dev stack の宣言 | 1〜3 |
-| B | E2E スクリプト | 4〜7 |
-| C | 動作確認 + Makefile | 8 |
+| A | dev stack の宣言 | 1〜4 |
+| B | E2E スクリプト | 5〜8 |
+| C | 動作確認 + Makefile | 9 |
 
 ---
 
@@ -73,7 +76,24 @@ echo ".local-keys/" >> .gitignore
 
 ---
 
-### ステップ 2: `compose.yaml`
+### ステップ 2: `descriptor.pb` 生成 (Envoy 向け proto ディスクリプタ)
+
+Envoy の `grpc_json_transcoder` filter が **HTTP/JSON ⇄ gRPC の変換** をするために、`.proto` をバイナリ化した **FileDescriptorSet** を参照する。Envoy は Go 生成コード (`*.pb.go` / `*_grpc.pb.go`) を直接使わないので、**descriptor.pb を別途用意する必要がある**。
+
+```bash
+# proto/ 配下の全 .proto を 1 個の descriptor.pb に束ねる
+cd proto && buf build -o ../descriptor.pb
+```
+
+- `google.api.http` 注釈を含んだ全 service / rpc / message が入る
+- Envoy は起動時にこれを読み、URL パターン → gRPC RPC のマッピングを動的に構築
+- 生成物は **.gitignore に追加**。ローカル / CI で都度生成する (ソースは `.proto`)
+
+**確認ポイント**: `buf build` が成功し、リポジトリ直下に `descriptor.pb` (バイナリ) が生成される。`file descriptor.pb` で `data` と判定される。
+
+---
+
+### ステップ 3: `compose.yaml`
 
 ```yaml
 # compose.yaml (dev / E2E 専用)
@@ -128,6 +148,7 @@ services:
       user-service: {condition: service_started}
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ./descriptor.pb:/etc/envoy/descriptor.pb:ro   # ★ Step 2 で生成したやつ
     ports:
       - "8080:8080"      # REST / WebSocket
       - "50051:50051"    # gRPC
@@ -140,7 +161,7 @@ services:
 
 ---
 
-### ステップ 3: `envoy.yaml` (Envoy standalone)
+### ステップ 4: `envoy.yaml` (Envoy standalone)
 
 ```yaml
 # envoy.yaml - dev / E2E 専用の最小設定
@@ -220,9 +241,29 @@ static_resources:
                       routes:
                         - match: {prefix: "/ws"}
                           route: {cluster: realtime_service, upgrade_configs: [{upgrade_type: websocket}]}
+                        # /api/v1/... は transcoder が gRPC に変換して
+                        # user.v1.UserService / chat.v1.ChatService にルーティング
+                        - match: {prefix: "/api/v1/auth/"}
+                          route: {cluster: user_service}
+                        - match: {prefix: "/api/v1/users"}
+                          route: {cluster: user_service}
+                        - match: {prefix: "/api/v1/rooms"}
+                          route: {cluster: chat_service}
                 http_filters:
                   - name: envoy.filters.http.jwt_authn
                     # (grpc_listener と同じ JwtAuthentication 設定を展開 or 参照)
+                  - name: envoy.filters.http.grpc_json_transcoder
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                      proto_descriptor: /etc/envoy/descriptor.pb   # ★ compose で mount
+                      services:
+                        - user.v1.UserService
+                        - chat.v1.ChatService
+                      print_options:
+                        add_whitespace: true
+                        always_print_primitive_fields: true
+                      # jwt_authn が既に x-user-id ヘッダに変換しているので、
+                      # transcoder はペイロードのみ HTTP/JSON ⇄ protobuf に変換する
                   - name: envoy.filters.http.router
 
   clusters:
@@ -269,11 +310,14 @@ static_resources:
 
 ## B. E2E スクリプト
 
-### ステップ 4: `scripts/e2e/00-up.sh` (起動 + migration)
+### ステップ 5: `scripts/e2e/00-up.sh` (起動 + migration)
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
+
+# 0) descriptor.pb を最新 proto から再生成 (Envoy が起動時に読む)
+make descriptor
 
 # 1) compose を立ち上げ
 docker compose up -d --scale realtime-service=2
@@ -299,7 +343,7 @@ echo "✅ stack up + migrations applied"
 
 ---
 
-### ステップ 5: `scripts/e2e/01-register-login.sh` (golden path)
+### ステップ 6: `scripts/e2e/01-register-login.sh` (golden path)
 
 ```bash
 #!/usr/bin/env bash
@@ -327,7 +371,7 @@ echo "✅ Register → Login → GetUser (JWT 検証経由) 成功"
 
 ---
 
-### ステップ 6: `scripts/e2e/02-chat.sh` (WebSocket + 2 プロセス Pub/Sub)
+### ステップ 7: `scripts/e2e/02-chat.sh` (WebSocket + 2 プロセス Pub/Sub)
 
 ```bash
 #!/usr/bin/env bash
@@ -366,29 +410,29 @@ kill $BOB_WS_PID
 
 ---
 
-### ステップ 7: `scripts/e2e/03-auth-failures.sh` (失敗ケース)
+### ステップ 8: `scripts/e2e/03-auth-failures.sh` (失敗ケース)
 
 | ケース | 期待結果 | テスト方法 |
 |---|---|---|
 | JWT 無しで保護 RPC | `401 Unauthorized` (Envoy が弾く) | `grpcurl` に Authorization ヘッダ無し |
 | 期限切れ JWT | `401 Unauthorized` | JWT_KEY_ID を別値で発行した JWT (署名は合うが iss / exp で落ちる用の別スクリプト) |
 | 署名改ざん JWT | `401 Unauthorized` | JWT の一部を書き換える |
-| alice の JWT で bob の `UpdateUser` | `PermissionDenied` | app 側の所有者認可 |
+| alice の JWT で `UpdateMe` | 対象は常に x-user-id で解決される alice 自身 | 他人を触る RPC が proto に無い (型で排除) |
 | 非メンバーの `SendMessage` | `PermissionDenied` | app 側の `EnsureMember` |
 
 ```bash
-# 例: JWT 無し → Envoy が 401
-grpcurl -plaintext -d '{"userId":"xxx"}' localhost:50051 user.v1.UserService/GetUser || \
+# 例: JWT 無し → Envoy が 401 (x-user-id が無いと app 側でも Unauthenticated)
+grpcurl -plaintext localhost:50051 user.v1.UserService/GetMe || \
   echo "✅ JWT 無しで弾かれた"
 
-# 例: 他人更新 → app 側 PermissionDenied
+# 例: 非メンバー送信 → app 側 PermissionDenied
 grpcurl -plaintext -H "authorization: Bearer $ALICE" \
-  -d '{"userId":"bob-uuid","displayName":"hacked"}' \
-  localhost:50051 user.v1.UserService/UpdateUser || \
-  echo "✅ 他人更新で PermissionDenied"
+  -d '{"roomId":"bob-only-room","content":"hi"}' \
+  localhost:50051 chat.v1.ChatService/SendMessage || \
+  echo "✅ 非メンバー送信で PermissionDenied"
 ```
 
-**確認ポイント**: Envoy 層での `401` と app 層での `PermissionDenied` が **責務通りに** 分担されている。
+**確認ポイント**: Envoy 層での `401` と app 層での `PermissionDenied` (`EnsureMember`) が **責務通りに** 分担されている。`/me` 系で「他人を触る」経路は RPC レベルで存在しないので runtime 認可の対象外。
 
 ---
 
@@ -403,11 +447,19 @@ docker compose down -v    # ボリューム (PG データ) も削除
 
 ## C. 動作確認 + Makefile
 
-### ステップ 8: Makefile ターゲット
+### ステップ 9: Makefile ターゲット
 
 ```makefile
+# proto → Go コード (pkg/auth とか userv1 とか)
+proto:
+	cd proto && buf generate
+
+# proto → Envoy 向けディスクリプタ (grpc_json_transcoder が読む)
+descriptor:
+	cd proto && buf build -o ../descriptor.pb
+
 e2e-up:
-	./scripts/e2e/00-up.sh
+	./scripts/e2e/00-up.sh    # 内部で make descriptor も呼ぶ
 
 e2e-run:
 	./scripts/e2e/01-register-login.sh
@@ -419,7 +471,7 @@ e2e-down:
 
 e2e-all: e2e-up e2e-run e2e-down
 
-.PHONY: e2e-up e2e-run e2e-down e2e-all
+.PHONY: proto descriptor e2e-up e2e-run e2e-down e2e-all
 ```
 
 `make e2e-all` で「立ち上げ → 全シナリオ実行 → 片付け」が 1 コマンド。
@@ -428,6 +480,7 @@ e2e-all: e2e-up e2e-run e2e-down
 
 ## 成果物
 
+- [ ] `descriptor.pb` が `make descriptor` で再生成でき、Envoy が起動時に読み込める
 - [ ] `compose.yaml` + `envoy.yaml` で全サービスが Envoy 経由で繋がる
 - [ ] `make e2e-up` で 5 秒程度で dev stack が立ち上がる (realtime ×2 含む)
 - [ ] `scripts/e2e/01-register-login.sh` で **Envoy の JWT 検証経路を含む golden path** が通る

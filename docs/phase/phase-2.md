@@ -94,21 +94,44 @@ Phase 1 の基盤に乗せる形で (a) chat-service に Message 機能、(b) re
 
 ---
 
-### ステップ 3: `internal/grpc/server.go` に Message RPC 追加
+### ステップ 3: Message GRPCAdapter 新設 + `internal/grpc/` 合流層
+
+Phase 1 では `room.GRPCAdapter` が `ChatServiceServer` を単独で満たしていたが、Phase 2 で Message RPC が加わるので構造を変える:
+
+1. `internal/message/grpc.go` に `message.GRPCAdapter` を新設 (SendMessage / GetMessages)
+2. `room/grpc.go` から `UnimplementedChatServiceServer` embed を外す (合流層に移す)
+3. `internal/grpc/server.go` を新設し、両アダプタを embed した薄い `Server` を置く
 
 ```go
-func (s *Server) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
+// internal/message/grpc.go
+package message
+
+type GRPCAdapter struct {
+    svc   *Service
+    rooms *room.Service  // EnsureMember (横断認可) のため
+}
+
+func (a *GRPCAdapter) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
     senderID, ok := auth.RequesterID(ctx)
     if !ok {
         return nil, status.Error(codes.Unauthenticated, "missing x-user-id")
     }
     // 認可: Room ↔ Message を横断する唯一の箇所
-    if err := s.rooms.EnsureMember(ctx, req.GetRoomId(), senderID); err != nil {
-        return nil, toGRPCError(err)
+    if err := a.rooms.EnsureMember(ctx, req.GetRoomId(), senderID); err != nil {
+        return nil, mapError(err)
     }
-    m, err := s.messages.Send(ctx, req.GetRoomId(), senderID, req.GetContent())
-    if err != nil { return nil, toGRPCError(err) }
+    m, err := a.svc.Send(ctx, req.GetRoomId(), senderID, req.GetContent())
+    if err != nil { return nil, mapError(err) }
     return &chatv1.SendMessageResponse{Message: toProto(m)}, nil
+}
+
+// internal/grpc/server.go
+package grpc
+
+type Server struct {
+    chatv1.UnimplementedChatServiceServer  // forward-compat (将来 RPC 追加時の defaults)
+    *room.GRPCAdapter                      // Room 系 RPC を提供
+    *message.GRPCAdapter                   // Message 系 RPC を提供
 }
 ```
 

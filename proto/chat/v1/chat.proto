@@ -1,0 +1,132 @@
+syntax = "proto3";
+
+package chat.v1;
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+service ChatService {
+  rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/rooms"
+      body: "*"
+    };
+  }
+
+  rpc GetRoom(GetRoomRequest) returns (GetRoomResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/rooms/{room_id}"
+    };
+  }
+
+  rpc ListRooms(ListRoomsRequest) returns (ListRoomsResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/rooms"
+    };
+  }
+
+  rpc SearchRooms(SearchRoomsRequest) returns (SearchRoomsResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/rooms/search"
+    };
+  }
+
+  rpc JoinRoom(JoinRoomRequest) returns (JoinRoomResponse) {
+    option (google.api.http) = {
+      post: "/api/v1/rooms/{room_id}/join"
+      body: "*"
+    };
+  }
+
+  rpc LeaveRoom(LeaveRoomRequest) returns (LeaveRoomResponse) {
+    option (google.api.http) = {
+      delete: "/api/v1/rooms/{room_id}/members/me"
+    };
+  }
+
+  // ListRoomMembers: ルームのメンバー一覧 (画面 #9)
+  //   chat-service 内部で user-service.BatchGetUsers を呼び display_name/avatar_url を enrich する。
+  rpc ListRoomMembers(ListRoomMembersRequest) returns (ListRoomMembersResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/rooms/{room_id}/members"
+    };
+  }
+}
+
+message Room {
+  string id = 1;
+  string name = 2;
+  string created_by = 3;
+  int32 member_count = 4;
+  google.protobuf.Timestamp created_at = 5;
+  // メンバー一覧はここには載せない。ListRoomMembers を別途叩く。
+}
+
+message RoomMember {
+  string user_id = 1;
+  google.protobuf.Timestamp joined_at = 2;
+  // ListRoomMembers のレスポンスで chat-service が enrich する軽量フィールド。
+  // 詳細情報 (status_text 等) は画面 #8 で GetUser(user_id) を叩いて取る。
+  string display_name = 3;
+  string avatar_url = 4;
+}
+
+message CreateRoomRequest {
+  string name = 1;
+}
+
+message CreateRoomResponse {
+  Room room = 1;
+}
+
+message GetRoomRequest {
+  string room_id = 1;
+}
+
+message GetRoomResponse {
+  Room room = 1;
+}
+
+message ListRoomsRequest {
+  int32 limit = 1;
+  string cursor = 2;
+}
+
+message ListRoomsResponse {
+  repeated Room rooms = 1;
+  string next_cursor = 2;
+}
+
+message SearchRoomsRequest {
+  string query = 1;
+  int32 limit = 2;
+  string cursor = 3;
+}
+
+message SearchRoomsResponse {
+  repeated Room rooms = 1;
+  string next_cursor = 2;
+}
+
+message JoinRoomRequest {
+  string room_id = 1;
+}
+
+message JoinRoomResponse {}
+
+message LeaveRoomRequest {
+  string room_id = 1;
+}
+
+message LeaveRoomResponse {}
+
+message ListRoomMembersRequest {
+  string room_id = 1;
+  int32 limit = 2;
+  string cursor = 3;
+}
+
+message ListRoomMembersResponse {
+  repeated RoomMember members = 1;
+  string next_cursor = 2;
+}
