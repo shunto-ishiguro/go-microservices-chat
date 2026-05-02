@@ -211,7 +211,6 @@ static_resources:
                             cache_duration: {seconds: 300}
                           claim_to_headers:
                             - {claim_name: sub, header_name: x-user-id}
-                            - {claim_name: preferred_username, header_name: x-username}
                       rules:
                         - match: {prefix: "/user.v1.UserService/Register"}
                           requires: {}
@@ -389,13 +388,15 @@ grpcurl -plaintext -H "authorization: Bearer $BOB" \
   -d '{"roomId":"'$ROOM'"}' localhost:50051 chat.v1.ChatService/JoinRoom
 
 # bob が WebSocket で受信待機 (別プロセス、realtime-service の 2 インスタンスのどちらかに振り分けられる)
-wscat -c "ws://localhost:8080/ws" -H "authorization: Bearer $BOB" > /tmp/bob.log &
+# room_id は接続時の URL クエリで確定する (1 接続 = 1 room)。Authorization ヘッダは Envoy が JWT 検証して x-user-id に変換する。
+wscat -c "ws://localhost:8080/ws?room_id=$ROOM" -H "authorization: Bearer $BOB" > /tmp/bob.log &
 BOB_WS_PID=$!
 sleep 1
 
 # alice が送信 (こちらも別インスタンスに振り分けられる可能性大)
-echo '{"type":"message","room_id":"'$ROOM'","content":"hello bob"}' | \
-  wscat -c "ws://localhost:8080/ws" -H "authorization: Bearer $ALICE" --wait 2
+# 送信 JSON は {type, content} のみ。room_id は URL クエリで既に確定済み。
+echo '{"type":"message","content":"hello bob"}' | \
+  wscat -c "ws://localhost:8080/ws?room_id=$ROOM" -H "authorization: Bearer $ALICE" --wait 2
 
 # bob のログに "hello bob" が入ったかを確認
 sleep 1

@@ -83,7 +83,9 @@ Go Workspace 骨組みから始め、`pkg/auth/` (JWT **発行** + JWKS 配信 +
 
 ### N+1 回避のバッチ
 
-`ListRoomMembers` でメンバー一覧を enrich する時、各メンバーごとに `GetUser` を呼ぶと **メンバー数 N に比例して gRPC 呼び出しが増える (N+1 問題)**。user-service 側に `BatchGetUsers([]user_ids)` を用意し、chat-service は `ListRoomMembers` 内で ID を 1 配列にまとめて **1 回** で取得する。同じ仕組みを Phase 2 の Message の sender enrich にも使い回す。なお `GetRoom` は enrich 不要な軽量レスポンス (ヘッダのみ) なので、そもそも BatchGetUsers を呼ばない。
+`ListRoomMembers` でメンバー一覧を enrich する時、各メンバーごとに `GetUser` を呼ぶと **メンバー数 N に比例して gRPC 呼び出しが増える (N+1 問題)**。user-service 側に `BatchGetUsers([]user_ids)` を用意し、chat-service は `ListRoomMembers` 内で ID を 1 配列にまとめて **1 回** で取得する。なお `GetRoom` は enrich 不要な軽量レスポンス (ヘッダのみ) なので、そもそも BatchGetUsers を呼ばない。
+
+> Phase 2 の `GetMessages` は **メッセージ送信者の enrich をしない** 設計 (素の `sender_id` (UUID) のみ返す)。クライアント側で必要なら distinct な sender_id を集めて `BatchGetUsers` を別途叩くか、参加メンバー一覧 (`ListRoomMembers`) で取得済みの profile キャッシュを使う。MVP スコープに絞ったため。
 
 ### JWT に関する責務の切り分け
 
@@ -220,7 +222,7 @@ func RequesterID(ctx context.Context) (string, bool) {
 - [ ] `internal/user/repository_inmem.go`: テスト用 InMem
 - [ ] `migrations/001_create_users.up.sql` + `002_create_refresh_tokens.up.sql`
 
-**確認ポイント**: `repository_test.go` で **InMem 実装** がテーブル駆動テストで PASS。PostgreSQL 実装は infra repo で実際に走らせて検証する (このリポジトリでは DB を立てない)。
+**確認ポイント**: `service_test.go` (Service 経由で InMem 実装を回す) と `grpc_test.go` (bufconn) がテーブル駆動テストで PASS。Repository 単独のテストファイルは作らず、Service 層から InMem を介して挙動検証する設計。PostgreSQL 実装は本リポジトリ Phase 4 の compose や infra repo で実際の PG を立てて疎通確認する。
 
 ---
 
@@ -261,7 +263,7 @@ func RequesterID(ctx context.Context) (string, bool) {
 - [ ] `migrations/001_create_rooms.up.sql` + `002_create_room_members.up.sql`
 - [ ] `messages.sender_id` の FK は張らない方針 (サービス境界を跨ぐため)
 
-**確認ポイント**: `repository_test.go` が InMem で PASS。
+**確認ポイント**: `service_test.go` で InMem 実装上の Service 経由検証 (CreateRoom 自動 join、ListMyRooms メンバーシップフィルタ、SearchRooms 部分一致 等) が PASS。
 
 ---
 
