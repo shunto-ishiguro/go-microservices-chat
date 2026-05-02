@@ -25,6 +25,8 @@ import (
 	chatv1 "go-microservices-chat/gen/go/chat/v1"
 	"go-microservices-chat/pkg/interceptor"
 	"go-microservices-chat/services/chat-service/internal/config"
+	chatgrpc "go-microservices-chat/services/chat-service/internal/grpc"
+	"go-microservices-chat/services/chat-service/internal/message"
 	"go-microservices-chat/services/chat-service/internal/room"
 	"go-microservices-chat/services/chat-service/internal/userclient"
 )
@@ -63,14 +65,17 @@ func run(logger *slog.Logger) error {
 
 	// DI: Repository → Service → GRPCAdapter の順に注入。interface 経由なのでテストでは
 	// InMem Repository + fake userclient に差し替えられる。
-	// Phase 1 では room.GRPCAdapter が単独で ChatServiceServer を満たす
-	// (Message 系 RPC は Unimplemented 応答)。Phase 2 で message を足す際に
-	// internal/grpc/ を新設して合流層を置く予定。
+	// Phase 2 から Room/Message の Adapter を分け、internal/grpc.Server で合流させる。
 	roomSvc := room.NewService(room.NewPostgresRepository(pool))
+	messageSvc := message.NewService(message.NewPostgresRepository(pool))
+	server := chatgrpc.NewServer(
+		room.NewGRPCAdapter(roomSvc, uc),
+		message.NewGRPCAdapter(messageSvc, roomSvc),
+	)
 	grpcSrv := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(interceptor.Logging(logger)),
 	)
-	chatv1.RegisterChatServiceServer(grpcSrv, room.NewGRPCAdapter(roomSvc, uc))
+	chatv1.RegisterChatServiceServer(grpcSrv, server)
 
 	lis, err := net.Listen("tcp", cfg.GRPCAddr)
 	if err != nil {
