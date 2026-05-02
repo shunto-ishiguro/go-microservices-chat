@@ -26,6 +26,8 @@ const (
 	ChatService_JoinRoom_FullMethodName        = "/chat.v1.ChatService/JoinRoom"
 	ChatService_LeaveRoom_FullMethodName       = "/chat.v1.ChatService/LeaveRoom"
 	ChatService_ListRoomMembers_FullMethodName = "/chat.v1.ChatService/ListRoomMembers"
+	ChatService_SendMessage_FullMethodName     = "/chat.v1.ChatService/SendMessage"
+	ChatService_GetMessages_FullMethodName     = "/chat.v1.ChatService/GetMessages"
 )
 
 // ChatServiceClient is the client API for ChatService service.
@@ -42,6 +44,15 @@ type ChatServiceClient interface {
 	//
 	//	chat-service 内部で user-service.BatchGetUsers を呼び display_name/avatar_url を enrich する。
 	ListRoomMembers(ctx context.Context, in *ListRoomMembersRequest, opts ...grpc.CallOption) (*ListRoomMembersResponse, error)
+	// SendMessage: ルームへメッセージを永続化する (内部 RPC、REST 非公開)。
+	//
+	//	realtime-service が WebSocket 受信時に chat-service へ書き込み依頼する経路。
+	//	配信は Redis Pub/Sub で別ルート、SendMessage は永続化専任。
+	SendMessage(ctx context.Context, in *SendMessageRequest, opts ...grpc.CallOption) (*SendMessageResponse, error)
+	// GetMessages: ルームのメッセージ履歴を新しい順に返す (画面 #6 の初期表示 / 過去ログスクロール)。
+	//
+	//	cursor-based pagination。空ルームでも 200 を返す。
+	GetMessages(ctx context.Context, in *GetMessagesRequest, opts ...grpc.CallOption) (*GetMessagesResponse, error)
 }
 
 type chatServiceClient struct {
@@ -122,6 +133,26 @@ func (c *chatServiceClient) ListRoomMembers(ctx context.Context, in *ListRoomMem
 	return out, nil
 }
 
+func (c *chatServiceClient) SendMessage(ctx context.Context, in *SendMessageRequest, opts ...grpc.CallOption) (*SendMessageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendMessageResponse)
+	err := c.cc.Invoke(ctx, ChatService_SendMessage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *chatServiceClient) GetMessages(ctx context.Context, in *GetMessagesRequest, opts ...grpc.CallOption) (*GetMessagesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetMessagesResponse)
+	err := c.cc.Invoke(ctx, ChatService_GetMessages_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ChatServiceServer is the server API for ChatService service.
 // All implementations must embed UnimplementedChatServiceServer
 // for forward compatibility.
@@ -136,6 +167,15 @@ type ChatServiceServer interface {
 	//
 	//	chat-service 内部で user-service.BatchGetUsers を呼び display_name/avatar_url を enrich する。
 	ListRoomMembers(context.Context, *ListRoomMembersRequest) (*ListRoomMembersResponse, error)
+	// SendMessage: ルームへメッセージを永続化する (内部 RPC、REST 非公開)。
+	//
+	//	realtime-service が WebSocket 受信時に chat-service へ書き込み依頼する経路。
+	//	配信は Redis Pub/Sub で別ルート、SendMessage は永続化専任。
+	SendMessage(context.Context, *SendMessageRequest) (*SendMessageResponse, error)
+	// GetMessages: ルームのメッセージ履歴を新しい順に返す (画面 #6 の初期表示 / 過去ログスクロール)。
+	//
+	//	cursor-based pagination。空ルームでも 200 を返す。
+	GetMessages(context.Context, *GetMessagesRequest) (*GetMessagesResponse, error)
 	mustEmbedUnimplementedChatServiceServer()
 }
 
@@ -166,6 +206,12 @@ func (UnimplementedChatServiceServer) LeaveRoom(context.Context, *LeaveRoomReque
 }
 func (UnimplementedChatServiceServer) ListRoomMembers(context.Context, *ListRoomMembersRequest) (*ListRoomMembersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListRoomMembers not implemented")
+}
+func (UnimplementedChatServiceServer) SendMessage(context.Context, *SendMessageRequest) (*SendMessageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SendMessage not implemented")
+}
+func (UnimplementedChatServiceServer) GetMessages(context.Context, *GetMessagesRequest) (*GetMessagesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetMessages not implemented")
 }
 func (UnimplementedChatServiceServer) mustEmbedUnimplementedChatServiceServer() {}
 func (UnimplementedChatServiceServer) testEmbeddedByValue()                     {}
@@ -314,6 +360,42 @@ func _ChatService_ListRoomMembers_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ChatService_SendMessage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendMessageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).SendMessage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_SendMessage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).SendMessage(ctx, req.(*SendMessageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ChatService_GetMessages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetMessagesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ChatServiceServer).GetMessages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ChatService_GetMessages_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ChatServiceServer).GetMessages(ctx, req.(*GetMessagesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ChatService_ServiceDesc is the grpc.ServiceDesc for ChatService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -348,6 +430,14 @@ var ChatService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListRoomMembers",
 			Handler:    _ChatService_ListRoomMembers_Handler,
+		},
+		{
+			MethodName: "SendMessage",
+			Handler:    _ChatService_SendMessage_Handler,
+		},
+		{
+			MethodName: "GetMessages",
+			Handler:    _ChatService_GetMessages_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
