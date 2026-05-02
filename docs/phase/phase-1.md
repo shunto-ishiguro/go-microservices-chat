@@ -144,70 +144,32 @@ Go Workspace 骨組みから始め、`pkg/auth/` (JWT **発行** + JWKS 配信 +
 
 ### ステップ 3: `pkg/auth/issuer.go` (RS256 JWT Issuer)
 
-```go
-type Issuer struct {
-    privateKey *rsa.PrivateKey
-    keyID      string
-}
-
-func (i *Issuer) IssueAccessToken(userID, username string) (string, error) {
-    token := jwt.NewWithClaims(jwt.SigningMethodRS256, Claims{
-        UserID:   userID,
-        Username: username,
-        RegisteredClaims: jwt.RegisteredClaims{
-            Issuer:    "chat-app",
-            Subject:   userID,
-            ExpiresAt: jwt.NewNumericDate(time.Now().Add(15 * time.Minute)),
-        },
-    })
-    token.Header["kid"] = i.keyID
-    return token.SignedString(i.privateKey)
-}
-```
+RSA 秘密鍵と key ID を保持する `Issuer` 型を用意し、`IssueAccessToken(userID, username)` で RS256 署名済み JWT を返す。クレームは `sub=userID` / `iss=chat-app` / 短い有効期限 (15 分程度)、ヘッダには `kid` を入れて Envoy 側 JWKS から鍵を引けるようにする。**Validator は持たない** (検証は infra 側 Envoy 責務)。
 
 - [ ] 実装 + ユニットテスト (発行した JWT のヘッダ / ペイロードを decode して検証)
 
-**確認ポイント**: 発行されたトークンを [jwt.io](https://jwt.io/) に貼って RS256 として認識される。**検証側は infra 側 Envoyが担当するので、このリポジトリに Validator は実装しない**。
+**確認ポイント**: 発行されたトークンを [jwt.io](https://jwt.io/) に貼って RS256 として認識され、`sub` / `iss` / `kid` が想定通り入っている。
 
 ---
 
 ### ステップ 4: `pkg/auth/jwks.go` (JWKS HTTP Handler)
 
-```go
-func (h *JWKSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    jwks := map[string]any{
-        "keys": []map[string]any{
-            {
-                "kty": "RSA", "kid": h.keyID, "alg": "RS256", "use": "sig",
-                "n": base64url(h.publicKey.N.Bytes()), "e": "AQAB",
-            },
-        },
-    }
-    json.NewEncoder(w).Encode(jwks)
-}
-```
+公開鍵と key ID を保持する `JWKSHandler` を `http.Handler` として実装し、`/.well-known/jwks.json` で JWKS 形式の JSON を返す。中身は `keys` 配列に 1 要素 (`kty=RSA` / `kid` / `alg=RS256` / `use=sig` / `n` (modulus を base64url) / `e=AQAB`) を入れた素直なレスポンス。Envoy が起動時にこの URL を fetch して公開鍵キャッシュに載せる前提。
 
 - [ ] 実装 + ユニットテスト
 
-**確認ポイント**: テストで JSON の形が合う (`kty`/`kid`/`alg`/`use`/`n`/`e`)。infra 側 Envoy (`remoteJWKS.uri`) がこの URL を起動時 1 回 fetch して公開鍵キャッシュに載せる前提。
+**確認ポイント**: テストで JSON の形が合う (`kty`/`kid`/`alg`/`use`/`n`/`e` が全部入っている)。
 
 ---
 
 ### ステップ 5: `pkg/auth/context.go` (RequesterID) + `pkg/interceptor/logging.go`
 
-```go
-// pkg/auth/context.go
-func RequesterID(ctx context.Context) (string, bool) {
-    md, ok := metadata.FromIncomingContext(ctx)
-    if !ok { return "", false }
-    ids := md.Get("x-user-id")
-    if len(ids) == 0 { return "", false }
-    return ids[0], true
-}
-```
+`RequesterID(ctx)` は incoming metadata から `x-user-id` を 1 つ取り出して `(id, ok)` で返すだけのヘルパ。metadata が無い / `x-user-id` が無い場合は `ok=false`。**署名検証は一切しない** (Envoy が検証済みで注入してくる前提)。呼び出し側はこの bool を見て `Unauthenticated` を返す。
+
+`pkg/interceptor/logging.go` は gRPC Unary Interceptor で、ctx にリクエスト ID を注入し、slog で JSON 形式の access log を出す。`authorization` ヘッダはマスクしてログに残さない。
 
 - [ ] `pkg/auth/context.go` 実装 + テスト
-- [ ] `pkg/interceptor/logging.go`: slog で JSON ログ、リクエスト ID を ctx に注入、`authorization` ヘッダはマスク
+- [ ] `pkg/interceptor/logging.go` 実装
 
 **確認ポイント**: metadata 有無 2 ケースで `RequesterID` が正しく返る / Logging Interceptor が JSON を出す。
 
