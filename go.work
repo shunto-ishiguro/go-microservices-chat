@@ -4,5 +4,6 @@ use (
 	./gen/go
 	./pkg
 	./services/chat-service
+	./services/realtime-service
 	./services/user-service
 )
