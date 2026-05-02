@@ -183,8 +183,9 @@ func (s *Service) GetUser(ctx context.Context, id string) (*User, error) {
 	return s.repo.GetUserByID(ctx, id)
 }
 
-// BatchGetUsers は他ユーザー N 件を 1 回の DB 呼び出しで取得する
-// (chat-service の member enrich / Phase 2 の Message sender enrich 用)。
+// BatchGetUsers は他ユーザー N 件を 1 回の DB 呼び出しで取得する。
+// chat-service の `ListRoomMembers` がメンバー一覧の enrich (display_name / avatar_url を引く)
+// に使う。Message の sender 側は Phase 2 では enrich しない設計なのでここでは関与しない。
 // 存在しない ID は結果から欠落する (部分成功を許容)。
 func (s *Service) BatchGetUsers(ctx context.Context, ids []string) ([]User, error) {
 	return s.repo.GetUsersByIDs(ctx, ids)
