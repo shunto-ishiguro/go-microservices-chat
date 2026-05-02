@@ -86,7 +86,7 @@ services/user-service/
 chat-service は proto 側で **1 つの gRPC サービス (`ChatService`) に Room と Message の RPC が両方含まれる**。
 Go で生成される `ChatServiceServer` interface は 1 つなので、最終的に登録される struct も 1 つ必要。
 **Phase 1 時点では Room のみ** なので `room.GRPCAdapter` が単独でその役を担う (Message 系 RPC は埋め込んだ `UnimplementedChatServiceServer` のデフォルト応答)。
-**Phase 2 で Message が加わる**時に初めて `internal/grpc/` を新設し、`room.GRPCAdapter` + `message.GRPCAdapter` を埋め込んだ薄い合流 struct を置く。
+**Phase 2 で Message が加わる**時に初めて `internal/grpc/` を新設し、両アダプタを named field で保持して各 RPC を forward する薄い合流 struct を置く (両ドメインの型 simple name が `GRPCAdapter` で衝突するため embed は使えない)。
 
 ```
 services/chat-service/                # Phase 1 時点 (Room のみ)
@@ -111,15 +111,16 @@ services/chat-service/                # Phase 1 時点 (Room のみ)
 │   ├── grpc.go                      # GRPCAdapter (Message RPC のみ)
 │   └── *_test.go
 └── internal/grpc/                   # 薄い合流層
-    └── server.go                    # *room.GRPCAdapter + *message.GRPCAdapter を embed
+    └── server.go                    # rooms / messages を named field で保持 + RPC を forward
 ```
 
 **ルール**:
 
 - **grpc.go はドメインパッケージと同居させる**。repository.go と同じ扱いで、ドメインに関する全てが 1 パッケージに閉じる (垂直分割の純化)
 - proto 型の import はドメインパッケージ内で許容する。**ただし service.go (業務ロジック) は proto に触れない** — proto は grpc.go 側に閉じ込める
-- `UnimplementedXxxServer` の埋め込みはいずれかのアダプタ 1 つに置く (forward-compat のため。複数に置くと depth ambiguity で合流層が壊れる)
+- `UnimplementedXxxServer` の埋め込みは合流層 1 箇所だけに置く (forward-compat のため)。各ドメインアダプタには置かない
 - 1 proto service / 1 ドメインなら grpc.go 単独 (user-service パターン)。複数ドメイン跨ぎなら薄い `internal/grpc/` 合流層 (chat-service Phase 2 パターン)
+- 合流層では **アダプタを embed せず named field で保持する**。Go の埋め込みは型の simple name をフィールド名にするため、両ドメインの型 (`room.GRPCAdapter` / `message.GRPCAdapter`) を同時に embed すると名前衝突する。各 RPC は `func (s *Server) CreateRoom(...) { return s.rooms.CreateRoom(...) }` の形で明示的に forward する
 
 ### 垂直分割を採用する理由
 
@@ -172,27 +173,30 @@ services/chat-service/                # Phase 1 時点 (Room のみ)
 `cmd/server/main.go` で全ての依存を組み立てる。
 
 ```go
-func main() {
-    cfg := config.Load()
-    pool, _ := pgxpool.New(ctx, cfg.DBURL)
+// services/user-service/cmd/server/main.go (要点抜粋、エラー処理省略)
+func run(logger *slog.Logger) error {
+    cfg, _ := config.Load()
+    priv, _ := jwt.ParseRSAPrivateKeyFromPEM([]byte(cfg.JWTPrivateKey))  // PEM → *rsa.PrivateKey
+    pool, _ := pgxpool.New(ctx, cfg.DatabaseURL)
 
-    userRepo    := user.NewPostgresRepository(pool)
-    issuer      := auth.NewIssuer(cfg.JWTPrivateKey, cfg.JWTKeyID)
-    userSvc     := user.NewService(userRepo, issuer)
-    userAdapter := user.NewGRPCAdapter(userSvc)
+    // DI: 下から上に組み立てる。Repository は interface なのでテストでは InMem に差し替えられる。
+    repo   := user.NewPostgresRepository(pool)
+    issuer := auth.NewIssuer(priv, cfg.JWTKeyID)
+    svc    := user.NewService(repo, issuer)
 
     grpcSrv := grpc.NewServer(
-        grpc.ChainUnaryInterceptor(
-            interceptor.Logging(logger),
-        ),
+        grpc.ChainUnaryInterceptor(interceptor.Logging(logger)),
     )
-    userv1.RegisterUserServiceServer(grpcSrv, userAdapter)
-    // ハンドラは auth.RequesterID(ctx) で呼び出し元を取得 (infra 側 Envoyが x-user-id を注入)
+    userv1.RegisterUserServiceServer(grpcSrv, user.NewGRPCAdapter(svc))
+    // ハンドラ内では auth.RequesterID(ctx) で呼び出し元を取得 (Envoy が x-user-id を注入)
 
+    // gRPC :50051 + JWKS HTTP :8082 を別 goroutine で同時起動 (実装は graceful shutdown 込み)
     lis, _ := net.Listen("tcp", cfg.GRPCAddr)
-    grpcSrv.Serve(lis)
+    return grpcSrv.Serve(lis)
 }
 ```
+
+> chat-service / realtime-service も同じ DI パターン。chat-service は Phase 2 で `room.GRPCAdapter` + `message.GRPCAdapter` を `internal/grpc.NewServer(...)` で束ねた合流層を `RegisterChatServiceServer` に渡す。realtime-service は gRPC サーバーを持たず HTTP `/ws` ハンドラ + Hub goroutine + Subscriber goroutine の構成。
 
 ---
 

@@ -99,15 +99,18 @@ CREATE TABLE messages (
     room_id         UUID NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
     sender_id       UUID NOT NULL,  -- user-service 所有、外部キーなし
     content         TEXT NOT NULL,
-    message_type    VARCHAR(20) NOT NULL DEFAULT 'text',
-                    -- text, image, file
-    parent_id       UUID REFERENCES messages(id),  -- スレッド返信
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_messages_room_created ON messages(room_id, created_at DESC);
-CREATE INDEX idx_messages_sender ON messages(sender_id);
+-- (room_id, created_at, id) のタプルで cursor pagination を高速化。
+-- ListByRoom が ORDER BY created_at DESC, id DESC + WHERE (created_at, id) < cursor で引くので、
+-- room_id で絞り込んだ後は created_at + id でインデックススキャンが効く。同一秒の取りこぼし防止に id を含める。
+CREATE INDEX idx_messages_room_created ON messages(room_id, created_at DESC, id DESC);
 ```
+
+> **Phase 2 のスコープに絞った最小カラム**: テキストのみ、スレッド返信なし、添付なし。
+> 将来 image / file / スレッドを追加する場合は `message_type` (enum) / `media_url` (TEXT) / `parent_id` (UUID, 自己参照 FK) を ALTER で追加できる。既存行は default で埋まるので破壊的変更にはならない。
+> 「特定ユーザーの全発言」を引く API は無いので `sender_id` 単独 INDEX は作らない (INSERT コストの分損)。
 
 ---
 

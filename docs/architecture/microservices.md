@@ -170,7 +170,7 @@ sequenceDiagram
     C->>GW: REST/gRPC (Bearer access_token)
     GW->>GW: JWT 検証 (JWKS で署名検証)
     GW->>GW: claims.sub → x-user-id ヘッダーに
-    GW->>Svc: gRPC + metadata{x-user-id, x-username}
+    GW->>Svc: gRPC + metadata{x-user-id}
     Svc->>Svc: auth.RequesterID(ctx)<br/>呼び出し元 UserID を取得
     Svc->>GW: response
     GW->>C: REST/gRPC response
