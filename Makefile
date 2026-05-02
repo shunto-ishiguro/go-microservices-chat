@@ -1,4 +1,6 @@
-.PHONY: proto-gen proto-lint test build tidy run-realtime
+.PHONY: proto-gen proto-lint test build tidy run-realtime image-build-all
+
+IMAGE_TAG ?= 0.1.0
 
 proto-gen:
 	cd proto && buf generate
@@ -26,3 +28,8 @@ run-realtime:
 	CHAT_SERVICE_ADDR=$${CHAT_SERVICE_ADDR:-localhost:50052} \
 	HTTP_ADDR=$${HTTP_ADDR:-:8081} \
 	go run ./services/realtime-service/cmd/server
+
+image-build-all:
+	docker build -t user-service:$(IMAGE_TAG)     -f services/user-service/Dockerfile .
+	docker build -t chat-service:$(IMAGE_TAG)     -f services/chat-service/Dockerfile .
+	docker build -t realtime-service:$(IMAGE_TAG) -f services/realtime-service/Dockerfile .
