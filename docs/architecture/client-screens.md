@@ -41,7 +41,7 @@
 | 3 | 公開ルームを探す | REST `GET /api/v1/rooms/search?q=` | **参加ボタン**: REST `POST /api/v1/rooms/:id/join` |
 | 4 | ルーム作成 | — | **作成ボタン**: REST `POST /api/v1/rooms` → 作成されたルームを返すので自動で #6 チャットへ遷移 |
 | 5 | 自分の参加ルーム一覧 | REST `GET /api/v1/rooms` (自分のメンバーシップのみ) | — (ルームクリックで #6 へ) |
-| 6 | チャット | REST `GET /api/v1/rooms/:id` (ヘッダのみ) + REST `GET /api/v1/rooms/:id/messages` + **WebSocket 接続** + WS `subscribe` | **送信**: WS `send_message` / **退出ボタン**: REST `DELETE /api/v1/rooms/:id/members/me` / **メンバー一覧ボタン**: #9 へ |
+| 6 | チャット | REST `GET /api/v1/rooms/:id` (ヘッダのみ) + REST `GET /api/v1/rooms/:id/messages` + **WebSocket 接続** (`?room_id=:id` で 1 接続 = 1 room) | **送信**: WS `{"type":"message","content":"..."}` / **退出ボタン**: REST `DELETE /api/v1/rooms/:id/members/me` / **メンバー一覧ボタン**: #9 へ |
 | 7 | ユーザー編集 | REST `GET /api/v1/users/me` | **保存**: REST `PUT /api/v1/users/me` |
 | 8 | メンバー詳細 | REST `GET /api/v1/users/:id` | — (閉じるだけ) |
 | 9 | ルームメンバー一覧 | REST `GET /api/v1/rooms/:id/members` | **メンバーアイコンタップ**: #8 へ |
@@ -52,7 +52,7 @@
 
 ### WebSocket で push されるもの (チャット画面 #6 に表示)
 
-- `new_message` (新着メッセージ)
+- `{"type":"message",...}` (新着メッセージ。自分の echo + 他者発言の両方が同じ type で来る)
 
 ---
 
@@ -112,8 +112,10 @@
 
 gRPC サーバーを公開しない。WebSocket のみ:
 
-- クライアント → サーバー: `subscribe` / `unsubscribe` / `send_message` / `ping`
-- サーバー → クライアント: `new_message` / `error` / `pong`
+- 接続時に `?room_id=<id>` query parameter で 1 接続 = 1 room を確定する (subscribe / unsubscribe での動的切替は持たない)
+- クライアント → サーバー: `{"type":"message","content":"..."}`
+- サーバー → クライアント: `{"type":"message","room_id":"...","sender_id":"...","content":"...","created_at":"..."}` / `{"type":"error","code":"...","message":"..."}`
+- アプリレベルの ping / pong は持たない (WebSocket 標準の Ping/Pong フレームに任せる)
 
 ---
 

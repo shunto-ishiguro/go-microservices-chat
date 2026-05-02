@@ -12,14 +12,10 @@ import (
 	"go-microservices-chat/services/chat-service/internal/userclient"
 )
 
-// GRPCAdapter は Room 関連 RPC を ChatServiceServer に適合させる。
-// Phase 2 で Message 関連 RPC が加わった段階で internal/grpc/ に合流層を置く予定だが、
-// Phase 1 では Room だけなので本アダプタ単体で ChatServiceServer を満たす。
-//
-// UnimplementedChatServiceServer の埋め込みは forward-compat のために必須。
-// Message 系 RPC (SendMessage 等) は Phase 2 まで Unimplemented のデフォルト応答になる。
+// GRPCAdapter は Room 関連 RPC を提供する。Phase 2 で message.GRPCAdapter と並ぶ形になり、
+// 両方を internal/grpc/Server に embed して ChatServiceServer を満たす設計に変わったので、
+// 本アダプタ自身は UnimplementedChatServiceServer を埋め込まない (= 単独では Server を満たさない)。
 type GRPCAdapter struct {
-	chatv1.UnimplementedChatServiceServer
 	svc        *Service
 	userClient userclient.Client
 }

@@ -51,6 +51,19 @@ service ChatService {
       get: "/api/v1/rooms/{room_id}/members"
     };
   }
+
+  // SendMessage: ルームへメッセージを永続化する (内部 RPC、REST 非公開)。
+  //   realtime-service が WebSocket 受信時に chat-service へ書き込み依頼する経路。
+  //   配信は Redis Pub/Sub で別ルート、SendMessage は永続化専任。
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // GetMessages: ルームのメッセージ履歴を新しい順に返す (画面 #6 の初期表示 / 過去ログスクロール)。
+  //   cursor-based pagination。空ルームでも 200 を返す。
+  rpc GetMessages(GetMessagesRequest) returns (GetMessagesResponse) {
+    option (google.api.http) = {
+      get: "/api/v1/rooms/{room_id}/messages"
+    };
+  }
 }
 
 message Room {
@@ -128,5 +141,40 @@ message ListRoomMembersRequest {
 
 message ListRoomMembersResponse {
   repeated RoomMember members = 1;
+  string next_cursor = 2;
+}
+
+message Message {
+  string id = 1;
+  string room_id = 2;
+  string sender_id = 3;
+  string content = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+message SendMessageRequest {
+  string room_id = 1;
+  // sender_id は realtime-service から渡される。
+  // chat-service 側で x-user-id (= 認証済みユーザー) との一致を検証する。
+  string sender_id = 2;
+  string content = 3;
+}
+
+message SendMessageResponse {
+  Message message = 1;
+}
+
+message GetMessagesRequest {
+  string room_id = 1;
+  // limit が 0 / 未指定の時はサーバー側でデフォルトを当てる。
+  int32 limit = 2;
+  // cursor は前回レスポンスの next_cursor をそのまま渡す (created_at + id をエンコードした不透明値)。
+  string cursor = 3;
+}
+
+message GetMessagesResponse {
+  // created_at の降順 (新しいもの順)。
+  repeated Message messages = 1;
+  // 続きがある時のみ非空。空文字なら末尾。
   string next_cursor = 2;
 }

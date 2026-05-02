@@ -14,6 +14,8 @@ import (
 
 	chatv1 "go-microservices-chat/gen/go/chat/v1"
 	authpkg "go-microservices-chat/pkg/auth"
+	chatgrpc "go-microservices-chat/services/chat-service/internal/grpc"
+	"go-microservices-chat/services/chat-service/internal/message"
 	"go-microservices-chat/services/chat-service/internal/room"
 	"go-microservices-chat/services/chat-service/internal/userclient"
 )
@@ -22,11 +24,15 @@ func startServer(t *testing.T) (chatv1.ChatServiceClient, *userclient.Fake, func
 	t.Helper()
 	repo := room.NewInMemRepository()
 	rooms := room.NewService(repo)
+	messages := message.NewService(message.NewInMemRepository())
 	fake := userclient.NewFake()
 
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	chatv1.RegisterChatServiceServer(srv, room.NewGRPCAdapter(rooms, fake))
+	chatv1.RegisterChatServiceServer(srv, chatgrpc.NewServer(
+		room.NewGRPCAdapter(rooms, fake),
+		message.NewGRPCAdapter(messages, rooms),
+	))
 	go func() { _ = srv.Serve(lis) }()
 
 	conn, err := grpc.NewClient("passthrough://bufnet",

@@ -2,7 +2,7 @@
 
 Phase 2 で組む「Alice が送ったメッセージが Bob の画面にリアルタイムで届く」までの流れを、**どのプロセスの何行目が動くか** まで追いかけて解説する。
 
-**Redis Pub/Sub を最初から配信バスとして使う** 設計。realtime-service は **プロセス (あるいは Pod) を複数並べても Go コードを変更しなくて済む** よう、最初から Pub/Sub 前提で実装する。infra リポジトリ側で docker-compose scale / K8s replicas をどう設定しても、app 側のコードは一切変わらない。
+**Redis Pub/Sub を最初から配信バスとして使う** 設計。realtime-service は **プロセス (あるいは Pod) を複数並べても Go コードを変更しなくて済む** よう、最初から Pub/Sub 前提で実装する。本リポジトリ Phase 4 の compose で `--scale realtime-service=2` にしても、infra リポジトリ側の K8s で `replicas: 2` にしても、app 側のコードは一切変わらない。
 
 ---
 
@@ -45,13 +45,21 @@ realtime-service は Hub (プロセス内の Go 構造体) の中で「`#general
 realtime-service は **起動した瞬間に** Redis に対して `PSUBSCRIBE room:*` を張りっぱなしにする。
 
 ```go
-// services/realtime-service/internal/pubsub/subscriber.go
-func (c *Client) SubscribeAllRooms(ctx context.Context, onMessage func(ch string, payload []byte)) {
-    pubsub := c.rdb.PSubscribe(ctx, "room:*")
-    defer pubsub.Close()
-
-    for msg := range pubsub.Channel() {   // ← ここで Redis からの push を待機
-        onMessage(msg.Channel, []byte(msg.Payload))
+// services/realtime-service/internal/pubsub/redis.go (抜粋)
+func (p *Redis) Subscribe(ctx context.Context, onMessage func(RoomEvent)) error {
+    ps := p.rdb.PSubscribe(ctx, "room:*")
+    defer ps.Close()
+    for {
+        select {
+        case <-ctx.Done():
+            return ctx.Err()
+        case msg, ok := <-ps.Channel():     // ← ここで Redis からの push を待機
+            if !ok {
+                return fmt.Errorf("subscription closed")
+            }
+            roomID := strings.TrimPrefix(msg.Channel, "room:")
+            onMessage(RoomEvent{RoomID: roomID, Payload: []byte(msg.Payload)})
+        }
     }
 }
 ```
@@ -71,9 +79,10 @@ realtime-service ══ Redis SUBSCRIBE (アイドル) ══ Redis
 ### ① Alice のブラウザ → realtime-service (WebSocket)
 
 Alice が送信ボタンを押す。ブラウザの JavaScript が WebSocket にメッセージを書き込む。
+WS 接続時の URL `?room_id=general` で送信先 room は確定済みなので、フレームには `room_id` を含めない。
 
 ```json
-{"type": "chat_message", "room_id": "general", "content": "こんにちは"}
+{"type": "message", "content": "こんにちは"}
 ```
 
 ```
@@ -88,21 +97,29 @@ realtime-service の WebSocket ハンドラが受信し、**2 つの処理を並
 
 ```go
 // services/realtime-service/internal/ws/handler.go (抜粋)
-func (h *wsHandler) onChatMessage(ctx context.Context, userID, roomID, content string) {
-    payload := encodeJSON(chatMessageEvent{
-        Type: "chat_message", RoomID: roomID, UserID: userID, Content: content,
-    })
+func (h *Handler) HandleMessage(ctx context.Context, userID, roomID, content string) {
+    out := Outbound{
+        Type: TypeMessage, RoomID: roomID, SenderID: userID, Content: content,
+        CreatedAt: h.now().UTC(),
+    }
+    payload, _ := json.Marshal(out)
 
-    // (a) 永続化: chat-service に gRPC Unary で保存依頼
+    // (a) 永続化: chatclient 経由で chat-service に gRPC SendMessage (内部で x-user-id を outgoing metadata に詰める)
     go func() {
-        _, _ = h.chatClient.SendMessage(ctx, &chatv1.SendMessageRequest{
-            RoomId: roomID, SenderId: userID, Content: content,
-        })
+        persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        if err := h.chatClient.SendMessage(persistCtx, userID, roomID, content); err != nil {
+            h.logger.Error("ws: persist failed", "error", err)
+        }
     }()
 
-    // (b) 配信: Redis に PUBLISH
+    // (b) 配信: Redis に PUBLISH (RoomEvent でラップ)
     go func() {
-        _ = h.pubsub.PublishRoomEvent(ctx, roomID, payload)
+        pubCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+        if err := h.pubsub.Publish(pubCtx, pubsub.RoomEvent{RoomID: roomID, Payload: payload}); err != nil {
+            h.logger.Error("ws: publish failed", "error", err)
+        }
     }()
 }
 ```
@@ -123,9 +140,14 @@ gRPC Unary の保存経路。これは永続化だけの責務。
 
 ```go
 // services/chat-service/internal/message/grpc.go
+// (実際は requester == sender_id チェックと EnsureMember 認可を挟むが、
+//  ここでは「永続化が責務」という骨格だけ示す)
 func (a *GRPCAdapter) SendMessage(ctx context.Context, req *chatv1.SendMessageRequest) (*chatv1.SendMessageResponse, error) {
-    msg := a.svc.Send(ctx, req)   // PostgreSQL に永続化
-    return &chatv1.SendMessageResponse{Message: toProto(msg)}, nil
+    m, err := a.svc.Send(ctx, req.GetRoomId(), req.GetSenderId(), req.GetContent())  // PostgreSQL に永続化
+    if err != nil {
+        return nil, mapError(err)
+    }
+    return &chatv1.SendMessageResponse{Message: toProto(m)}, nil
 }
 ```
 
@@ -153,11 +175,12 @@ Redis ───┤
 起動時に張ってあった `PSubscribe` goroutine がここで起きる。
 
 ```go
-for msg := range pubsub.Channel() {
+// 起動時に張った Subscriber goroutine の中身 (実装は redis.go の Subscribe ループ + main の onMessage コールバック)
+case msg, ok := <-ps.Channel():
     // msg.Channel = "room:general"
-    // msg.Payload = '{"type":"chat_message", ...}'
-    hub.Dispatch(roomIDFromChannel(msg.Channel), []byte(msg.Payload))
-}
+    // msg.Payload = '{"type":"message","room_id":"general","sender_id":"alice","content":"...","created_at":"..."}'
+    roomID := strings.TrimPrefix(msg.Channel, "room:")
+    h.LocalBroadcast(hub.LocalEvent{RoomID: roomID, Payload: []byte(msg.Payload)})
 ```
 
 ---
@@ -165,12 +188,15 @@ for msg := range pubsub.Channel() {
 ### ⑥ Hub がルーム内の全 WebSocket にブロードキャスト
 
 ```go
-// services/realtime-service/internal/hub/hub.go
-func (h *Hub) Dispatch(roomID string, payload []byte) {
-    for client := range h.rooms[roomID] {   // Alice と Bob の 2 接続
-        client.send <- payload
+// services/realtime-service/internal/hub/hub.go (broadcast case 抜粋)
+case ev := <-h.broadcast:
+    for c := range h.rooms[ev.RoomID] {   // 同プロセスに繋いでいる Alice or Bob (どちらか片方が居る)
+        // バッファ満杯の slow client は drop して Hub 全体は止めない
+        select {
+        case c.send <- ev.Payload:
+        default:
+        }
     }
-}
 ```
 
 ---
@@ -180,10 +206,11 @@ func (h *Hub) Dispatch(roomID string, payload []byte) {
 各クライアントの書き込み goroutine が、`client.send` から取り出して `conn.WriteMessage()` でブラウザに送る。
 
 ```json
-{"type": "chat_message",
+{"type": "message",
  "room_id": "general",
- "user_id": "alice",
- "content": "こんにちは"}
+ "sender_id": "alice-uuid",
+ "content": "こんにちは",
+ "created_at": "2026-05-02T10:30:00Z"}
 ```
 
 Bob のブラウザの JavaScript が `ws.onmessage` でこれを拾い、画面に「Alice: こんにちは」を表示する。**これでゴール**。

@@ -6,8 +6,8 @@
 
 ## プロジェクトの目的 (2 軸)
 
-1. **マイクロサービスアーキテクチャを学ぶ** — サービス分割 / gRPC サービス間通信 / Database per Service / Redis Pub/Sub による WebSocket 水平スケール / 認証発行の責務分離
-2. **chat サービスを通じて Go の書き方・概念・フローを学ぶ** — 層構造 / 依存性注入 / `context.Context` / goroutine + channel / interface によるテスト容易性
+1. **マイクロサービスアーキテクチャを学ぶ** — サービス分割 / gRPC サービス間通信 / Database per Service / **WebSocket Hub (プロセス内ローカル配送) + Redis Pub/Sub (プロセス間 fan-out) の 2 層構造による水平スケール** / 認証発行の責務分離
+2. **chat サービスを通じて Go の書き方・概念・フローを学ぶ** — 層構造 / 依存性注入 / `context.Context` / goroutine + channel (1 goroutine 直列化で lock free な Hub 設計) / interface によるテスト容易性
 
 ## スコープ
 
@@ -81,7 +81,7 @@ graph LR
 | ログ | log/slog (JSON) |
 | JWT 署名 | golang-jwt/jwt (RS256、**発行のみ**) |
 | Pub/Sub | Redis (go-redis) |
-| WebSocket | gorilla/websocket |
+| WebSocket | coder/websocket (旧 nhooyr.io/websocket。シンプルな context 対応 API) |
 | コンテナ | Docker (multi-stage build / distroless) |
 
 ## プロジェクト構成
